@@ -1,0 +1,19 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# research data & models (regenerate with the CLI, never commit)
+data/
+models/
+*.onnx
+
+# mt5 artefacts
+*.ex5
+*.mq5.bak
+MQL5/Files/
