@@ -153,7 +153,7 @@ bool CInfoPanel::Create(const long chart_id, const int subwin,
       m_sep_after[i] = sep_after[i];
 
    //--- background
-   if(!ObjectCreate(m_chart, BgName(), OBJ_RECT_LABEL, m_subwin, 0, 0))
+   if(!ObjectCreate(m_chart, BgName(), OBJ_RECTANGLE_LABEL, m_subwin, 0, 0))
       return false;
    ObjectSetInteger(m_chart, BgName(), OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(m_chart, BgName(), OBJPROP_BGCOLOR, CLR_BG);
@@ -165,7 +165,7 @@ bool CInfoPanel::Create(const long chart_id, const int subwin,
    ObjectSetInteger(m_chart, BgName(), OBJPROP_HIDDEN, true);
 
    //--- header (drag bar)
-   if(!ObjectCreate(m_chart, HeaderName(), OBJ_RECT_LABEL, m_subwin, 0, 0))
+   if(!ObjectCreate(m_chart, HeaderName(), OBJ_RECTANGLE_LABEL, m_subwin, 0, 0))
       return false;
    ObjectSetInteger(m_chart, HeaderName(), OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(m_chart, HeaderName(), OBJPROP_BGCOLOR, CLR_HEADER_BG);
@@ -193,7 +193,7 @@ bool CInfoPanel::Create(const long chart_id, const int subwin,
       if(m_sep_after[i])
         {
          string sname = SepName(i);
-         if(!ObjectCreate(m_chart, sname, OBJ_RECT_LABEL, m_subwin, 0, 0))
+         if(!ObjectCreate(m_chart, sname, OBJ_RECTANGLE_LABEL, m_subwin, 0, 0))
             return false;
          ObjectSetInteger(m_chart, sname, OBJPROP_CORNER, CORNER_LEFT_UPPER);
          ObjectSetInteger(m_chart, sname, OBJPROP_BGCOLOR, CLR_SEP);
