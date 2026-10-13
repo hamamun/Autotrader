@@ -4,13 +4,16 @@
 //| Phase 1: interface (MAIN + LIVE TRADING panels) - soft eye-       |
 //|          friendly look, drag by title bar, auto-size, live quotes, |
 //|          preview states.                                           |
-//| Phase 2+: symbol intelligence, regime, direction engine, trading.  |
+//| Phase 2: Symbol Intelligence + Regime engine (live, see below).    |
+//| Phase 3+: direction engine, trading.                               |
 //+------------------------------------------------------------------+
 #property copyright "Autotrader"
 #property version   "1.00"
-#property description "Autotrader - automated MT5 trading EA (Phase 1: interface preview)"
+#property description "Autotrader - automated MT5 trading EA (Phase 2: symbol intelligence + regime engine)"
 
 #include <Autotrader/Panel.mqh>
+#include <Autotrader/SymbolIntelligence.mqh>
+#include <Autotrader/RegimeEngine.mqh>
 
 //--- the only user input (owner decision)
 input bool InpAutoTrading = true; // Auto Trading
@@ -134,12 +137,33 @@ double AvgRangePrice(void)
   }
 
 //+------------------------------------------------------------------+
-//| build one preview signal (Phase 1 sample values)                  |
+//| Phase 2 engines: study the symbol + classify the regime.          |
+//| Refreshed on a timer (history copies are too heavy for every      |
+//| tick); the panel quotes themselves still update every tick.       |
+//+------------------------------------------------------------------+
+void RefreshEngines(const bool force)
+  {
+   datetime now = TimeCurrent();
+   if(!force && g_engines_at > 0 && now - g_engines_at < 5)
+      return;
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+   g_symbol.Refresh(_Symbol, tf);
+   g_regime.Refresh(_Symbol, tf);
+   g_engines_at = now;
+  }
+
+//+------------------------------------------------------------------+
+//| build one preview signal (sample values - real direction engine   |
+//| arrives in Phase 3; distances already use the Phase 2 profile:    |
+//| the symbol's own typical wiggle x its auto-set dials)             |
 //+------------------------------------------------------------------+
 void BuildSampleSignal(void)
   {
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double range = AvgRangePrice();
+   double range = (g_symbol.Ready() && g_symbol.AtrPrice() > 0.0)
+                  ? g_symbol.AtrPrice() : AvgRangePrice();
+   double sl_mult = (g_symbol.Ready()) ? g_symbol.SlMult() : 1.60;
+   double tp_mult = (g_symbol.Ready()) ? g_symbol.TpMult() : 3.50;
    g_lots = 0.10;
 
    if(g_state == 1) // HOLD
@@ -153,15 +177,15 @@ void BuildSampleSignal(void)
      {
       g_confidence = 91;
       g_entry = bid - 0.80 * range;
-      g_sl    = g_entry - 1.60 * range;
-      g_tp    = g_entry + 3.50 * range;
+      g_sl    = g_entry - sl_mult * range;
+      g_tp    = g_entry + tp_mult * range;
      }
    else               // SELL
      {
       g_confidence = 84;
       g_entry = bid + 0.80 * range;
-      g_sl    = g_entry + 1.60 * range;
-      g_tp    = g_entry - 3.50 * range;
+      g_sl    = g_entry + sl_mult * range;
+      g_tp    = g_entry - tp_mult * range;
      }
   }
 
@@ -207,11 +231,10 @@ void UpdateMainPanel(void)
    g_main.SetRow(1, "Bid: " + FmtPrice(bid) + " | Ask: " + FmtPrice(ask) +
                     " | Spread: " + IntegerToString(spread) + " pts", CLR_TEXT);
 
-   //--- regime (sample in phase 1; real engine in phase 2)
-   string regime = "TRENDING";
-   if(g_state == 1)
-      regime = "RANGING";
-   g_main.SetRow(2, "Regime: " + regime, CLR_TEXT);
+   //--- regime: REAL since Phase 2 (expanded, specific labels agreed
+   //--- with the owner - direction + strength, or where price sits in
+   //--- the range). Plain soft text: only SIGNAL/STATUS are coloured.
+   g_main.SetRow(2, "Regime: " + g_regime.Display(), CLR_TEXT);
 
    //--- signal + confidence
    string sig_txt;
@@ -253,8 +276,12 @@ void UpdateMainPanel(void)
    g_main.SetRow(9, "Session: " + SessionName() + " | Expected Duration: " +
                     ExpectedDuration(), CLR_TEXT);
 
-   //--- status
-   g_main.SetRow(10, "STATUS: PHASE 1 UI PREVIEW - direction engine arrives in phase 2", CLR_ORANGE);
+   //--- status (coloured row): Phase 2 state in plain words
+   if(!g_symbol.Ready() || !g_regime.Ready())
+      g_main.SetRow(10, "STATUS: Calibrating - studying this symbol, collecting price history", CLR_ORANGE);
+   else
+      g_main.SetRow(10, "STATUS: Phase 2 live - " + g_symbol.ClassLabel() +
+                        " profile ready, regime live; signals still preview (Phase 3)", CLR_ORANGE);
 
    //--- counters (owner rule: Win = closed positive, Loss = closed negative, BE = zero)
    g_main.SetRow(11, "Today: Num of Signal: 0, Win: 0, Loss: 0, BE: 0", CLR_TEXT);
@@ -308,7 +335,7 @@ void UpdateLivePanel(void)
          be = "ARMED";
       g_live.SetRow(4, "Break-Even: " + be, CLR_TEXT);
      }
-   g_live.SetRow(5, "Trail Stop: OFF (phase 2)", CLR_TEXT);
+   g_live.SetRow(5, "Trail Stop: OFF (later phase)", CLR_TEXT);
 
    //--- TP ladder rows (owner's 60 / 80 / 100 idea)
    double prog = 0.0;
@@ -407,6 +434,7 @@ int OnInit()
    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
 
    g_state_started = TimeCurrent();
+   RefreshEngines(true);   // Phase 2: profile this symbol + first regime read
    BuildSampleSignal();
    UpdateUI();
 
@@ -440,8 +468,10 @@ void OnTick()
 void OnTimer()
   {
    g_timer_ticks++;
+   RefreshEngines(false);   // Phase 2: keep profile + regime current (5s)
    //--- cycle sample states every 20s so the owner can see
-   //    BUY -> HOLD -> SELL -> ... on the panel (phase 1 preview only)
+   //    BUY -> HOLD -> SELL -> ... on the panel (preview only, Phase 3
+   //    replaces these samples with the real direction engine)
    if(g_timer_ticks % 20 == 0)
      {
       g_state = (g_state + 1) % 3;
@@ -478,6 +508,10 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      }
 
    if(id == CHARTEVENT_CHART_CHANGE)
+     {
+      RefreshEngines(true);   // new TF/symbol context: re-study at once
+      BuildSampleSignal();
       UpdateUI();
+     }
   }
 //+------------------------------------------------------------------+
