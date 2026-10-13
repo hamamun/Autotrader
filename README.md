@@ -20,8 +20,16 @@ What works right now:
   order): order info, Entry → Now with floating P/L, **Stop Loss journey**,
   Break-Even state, Trail Stop (phase 2), TP1/TP2/TP3 ladder (60/80/100) with
   live status, manager STATUS line.
-- Drag: press-and-drag either panel header — the whole unit moves together.
-- Auto-size: panels measure their own text and grow — **no truncation, no overlap.**
+- Soft eye-friendly look: dark-grey body (not black), **Segoe UI** font —
+  **12pt for every row, 14pt for the SIGNAL row only** — in one soft light-grey
+  colour. **Only the SIGNAL and STATUS rows are coloured** (BUY soft green /
+  SELL soft red / HOLD muted grey; STATUS soft amber, red for alerts); nothing
+  else carries colour.
+- Drag: press-and-drag either panel's **title bar** (the lighter grey bar with
+  the title text in it) — the whole unit moves together; the chart underneath
+  does not scroll while you drag.
+- Auto-size: panels measure every row at its real drawn size (including the
+  14pt SIGNAL row) and grow wider/taller to fit — **no truncation, no overlap.**
 - Auto-detects chart timeframe: on anything other than M5/M15/M30 the panel
   shows labels only + "Incompatible chart" status.
 - Preview cycle: sample BUY → HOLD → SELL states rotate every ~20 seconds so

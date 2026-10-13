@@ -1,8 +1,9 @@
 //+------------------------------------------------------------------+
 //| Autotrader.mq5                                                    |
 //| Autotrader - fully automatic MT5 trading EA.                      |
-//| Phase 1: interface (MAIN + LIVE TRADING panels) - exact look,      |
-//|          drag, auto-size, live quotes, preview states.             |
+//| Phase 1: interface (MAIN + LIVE TRADING panels) - soft eye-       |
+//|          friendly look, drag by title bar, auto-size, live quotes, |
+//|          preview states.                                           |
 //| Phase 2+: symbol intelligence, regime, direction engine, trading.  |
 //+------------------------------------------------------------------+
 #property copyright "Autotrader"
@@ -180,19 +181,21 @@ void UpdateMainPanel(void)
 
    if(!g_compatible_tf)
      {
-      //--- owner rule: labels only, no data, status names the problem
-      g_main.SetRow(1,  "Bid: " + dashes + " | Ask: " + dashes + " | Spread: " + dashes, CLR_DIM);
-      g_main.SetRow(2,  "Regime: " + dashes, CLR_DIM);
+      //--- owner rule: labels only, no data, status names the problem.
+      //--- Colour rule: only SIGNAL and STATUS may be coloured - every
+      //--- other row uses the one soft CLR_TEXT, here and everywhere.
+      g_main.SetRow(1,  "Bid: " + dashes + " | Ask: " + dashes + " | Spread: " + dashes, CLR_TEXT);
+      g_main.SetRow(2,  "Regime: " + dashes, CLR_TEXT);
       g_main.SetRow(3,  "SIGNAL: " + dashes, CLR_DIM);
-      g_main.SetRow(4,  "Confidence: " + dashes, CLR_DIM);
-      g_main.SetRow(5,  "Entry: " + dashes, CLR_DIM);
-      g_main.SetRow(6,  "Stop Loss: " + dashes, CLR_DIM);
-      g_main.SetRow(7,  "Take Profit: " + dashes, CLR_DIM);
-      g_main.SetRow(8,  "Risk:Reward: " + dashes, CLR_DIM);
-      g_main.SetRow(9,  "Session: " + dashes, CLR_DIM);
+      g_main.SetRow(4,  "Confidence: " + dashes, CLR_TEXT);
+      g_main.SetRow(5,  "Entry: " + dashes, CLR_TEXT);
+      g_main.SetRow(6,  "Stop Loss: " + dashes, CLR_TEXT);
+      g_main.SetRow(7,  "Take Profit: " + dashes, CLR_TEXT);
+      g_main.SetRow(8,  "Risk:Reward: " + dashes, CLR_TEXT);
+      g_main.SetRow(9,  "Session: " + dashes, CLR_TEXT);
       g_main.SetRow(10, "STATUS: Incompatible chart - please attach to M5, M15 or M30", CLR_RED);
-      g_main.SetRow(11, "Today: " + dashes, CLR_DIM);
-      g_main.SetRow(12, "All Time: " + dashes, CLR_DIM);
+      g_main.SetRow(11, "Today: " + dashes, CLR_TEXT);
+      g_main.SetRow(12, "All Time: " + dashes, CLR_TEXT);
       g_main.Layout();
       return;
      }
@@ -222,10 +225,10 @@ void UpdateMainPanel(void)
 
    if(g_state == 1) // HOLD: no price plan rows
      {
-      g_main.SetRow(5, "Entry: " + GLYPH_DASH, CLR_DIM);
-      g_main.SetRow(6, "Stop Loss: " + GLYPH_DASH, CLR_DIM);
-      g_main.SetRow(7, "Take Profit: " + GLYPH_DASH, CLR_DIM);
-      g_main.SetRow(8, "Risk:Reward: " + GLYPH_DASH, CLR_DIM);
+      g_main.SetRow(5, "Entry: " + GLYPH_DASH, CLR_TEXT);
+      g_main.SetRow(6, "Stop Loss: " + GLYPH_DASH, CLR_TEXT);
+      g_main.SetRow(7, "Take Profit: " + GLYPH_DASH, CLR_TEXT);
+      g_main.SetRow(8, "Risk:Reward: " + GLYPH_DASH, CLR_TEXT);
      }
    else
      {
@@ -288,11 +291,12 @@ void UpdateLivePanel(void)
    g_live.SetRow(2, "Entry: " + FmtPrice(g_entry) + " " + ShortToString(0x2192) + " Now: " +
                     FmtPrice(bid) + "  (floating " + FmtUsd(fl) + ")", CLR_TEXT);
 
-   //--- Stop Loss row (owner asked for it) - shows the SL journey
+   //--- Stop Loss row (owner asked for it) - shows the SL journey.
+   //--- Plain soft text: only SIGNAL/STATUS rows carry colour.
    if(t < 6)
      {
       g_live.SetRow(3, "Stop Loss : " + FmtPrice(g_sl) + "  (initial)", CLR_TEXT);
-      g_live.SetRow(4, "Break-Even: not armed", CLR_DIM);
+      g_live.SetRow(4, "Break-Even: not armed", CLR_TEXT);
      }
    else
      {
@@ -302,9 +306,9 @@ void UpdateLivePanel(void)
       string be = "LOCKED";
       if(t < 8)
          be = "ARMED";
-      g_live.SetRow(4, "Break-Even: " + be, CLR_GREEN);
+      g_live.SetRow(4, "Break-Even: " + be, CLR_TEXT);
      }
-   g_live.SetRow(5, "Trail Stop: OFF (phase 2)", CLR_DIM);
+   g_live.SetRow(5, "Trail Stop: OFF (phase 2)", CLR_TEXT);
 
    //--- TP ladder rows (owner's 60 / 80 / 100 idea)
    double prog = 0.0;
@@ -317,26 +321,26 @@ void UpdateLivePanel(void)
                        DoubleToString(prog, 0) + "% progress to target", CLR_TEXT);
    else
       g_live.SetRow(6, "TP1 " + FmtPrice(tp1) + " (60%) : " + GLYPH_CHECK +
-                       " HIT - closed 50% of lot", CLR_GREEN);
+                       " HIT - closed 50% of lot", CLR_TEXT);
 
    if(t < 16)
       g_live.SetRow(7, "TP2 " + FmtPrice(tp2) + " (80%) : pending", CLR_TEXT);
    else
       g_live.SetRow(7, "TP2 " + FmtPrice(tp2) + " (80%) : " + GLYPH_CHECK +
-                       " HIT - closed 30% of lot", CLR_GREEN);
+                       " HIT - closed 30% of lot", CLR_TEXT);
 
    if(t < 19)
       g_live.SetRow(8, "TP3 " + FmtPrice(tp3) + " (100%): pending", CLR_TEXT);
    else
       g_live.SetRow(8, "TP3 " + FmtPrice(tp3) + " (100%): " + GLYPH_CHECK +
-                       " HIT - closed 20% of lot", CLR_GREEN);
+                       " HIT - closed 20% of lot", CLR_TEXT);
 
    string st;
    if(t < 6)       st = "STATUS: Managing - running to TP1";
    else if(t < 12) st = "STATUS: Managing - running to TP2";
    else if(t < 16) st = "STATUS: Managing - running to TP3";
    else            st = "STATUS: Managing - ladder complete";
-   g_live.SetRow(9, st, CLR_TEXT);
+   g_live.SetRow(9, st, CLR_ORANGE);   // STATUS row: coloured by design
 
    g_live.Layout();
   }
@@ -392,6 +396,7 @@ int OnInit()
       Print("Autotrader: failed to create MAIN panel");
       return INIT_FAILED;
      }
+   g_main.SetSignalRow(3);   // SIGNAL row alone at 14pt (all else 12pt)
    if(!g_live.Create(0, 0, "ATR_L_", 10, live_sep, 15, 15))
      {
       Print("Autotrader: failed to create LIVE panel");
@@ -417,6 +422,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    g_main.Destroy();
    g_live.Destroy();
+   ChartSetInteger(0, CHART_MOUSE_SCROLL, true);   // restore chart scroll
    ChartRedraw(0);
   }
 
