@@ -1,15 +1,19 @@
 //+------------------------------------------------------------------+
 //| Autotrader.mq5                                                    |
 //| Autotrader - fully automatic MT5 trading EA.                      |
-//| Phase 1: interface (MAIN + LIVE TRADING panels) - exact look,      |
-//|          drag, auto-size, live quotes, preview states.             |
-//| Phase 2+: symbol intelligence, regime, direction engine, trading.  |
+//| Phase 1: interface (MAIN + LIVE TRADING panels) - soft eye-       |
+//|          friendly look, drag by title bar, auto-size, live quotes, |
+//|          preview states.                                           |
+//| Phase 2: Symbol Intelligence + Regime engine (live, see below).    |
+//| Phase 3+: direction engine, trading.                               |
 //+------------------------------------------------------------------+
 #property copyright "Autotrader"
 #property version   "1.00"
-#property description "Autotrader - automated MT5 trading EA (Phase 1: interface preview)"
+#property description "Autotrader - automated MT5 trading EA (Phase 2: symbol intelligence + regime engine)"
 
 #include <Autotrader/Panel.mqh>
+#include <Autotrader/SymbolIntelligence.mqh>
+#include <Autotrader/RegimeEngine.mqh>
 
 //--- the only user input (owner decision)
 input bool InpAutoTrading = true; // Auto Trading
@@ -133,12 +137,33 @@ double AvgRangePrice(void)
   }
 
 //+------------------------------------------------------------------+
-//| build one preview signal (Phase 1 sample values)                  |
+//| Phase 2 engines: study the symbol + classify the regime.          |
+//| Refreshed on a timer (history copies are too heavy for every      |
+//| tick); the panel quotes themselves still update every tick.       |
+//+------------------------------------------------------------------+
+void RefreshEngines(const bool force)
+  {
+   datetime now = TimeCurrent();
+   if(!force && g_engines_at > 0 && now - g_engines_at < 5)
+      return;
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+   g_symbol.Refresh(_Symbol, tf);
+   g_regime.Refresh(_Symbol, tf);
+   g_engines_at = now;
+  }
+
+//+------------------------------------------------------------------+
+//| build one preview signal (sample values - real direction engine   |
+//| arrives in Phase 3; distances already use the Phase 2 profile:    |
+//| the symbol's own typical wiggle x its auto-set dials)             |
 //+------------------------------------------------------------------+
 void BuildSampleSignal(void)
   {
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double range = AvgRangePrice();
+   double range = (g_symbol.Ready() && g_symbol.AtrPrice() > 0.0)
+                  ? g_symbol.AtrPrice() : AvgRangePrice();
+   double sl_mult = (g_symbol.Ready()) ? g_symbol.SlMult() : 1.60;
+   double tp_mult = (g_symbol.Ready()) ? g_symbol.TpMult() : 3.50;
    g_lots = 0.10;
 
    if(g_state == 1) // HOLD
@@ -152,15 +177,15 @@ void BuildSampleSignal(void)
      {
       g_confidence = 91;
       g_entry = bid - 0.80 * range;
-      g_sl    = g_entry - 1.60 * range;
-      g_tp    = g_entry + 3.50 * range;
+      g_sl    = g_entry - sl_mult * range;
+      g_tp    = g_entry + tp_mult * range;
      }
    else               // SELL
      {
       g_confidence = 84;
       g_entry = bid + 0.80 * range;
-      g_sl    = g_entry + 1.60 * range;
-      g_tp    = g_entry - 3.50 * range;
+      g_sl    = g_entry + sl_mult * range;
+      g_tp    = g_entry - tp_mult * range;
      }
   }
 
@@ -180,19 +205,21 @@ void UpdateMainPanel(void)
 
    if(!g_compatible_tf)
      {
-      //--- owner rule: labels only, no data, status names the problem
-      g_main.SetRow(1,  "Bid: " + dashes + " | Ask: " + dashes + " | Spread: " + dashes, CLR_DIM);
-      g_main.SetRow(2,  "Regime: " + dashes, CLR_DIM);
+      //--- owner rule: labels only, no data, status names the problem.
+      //--- Colour rule: only SIGNAL and STATUS may be coloured - every
+      //--- other row uses the one soft CLR_TEXT, here and everywhere.
+      g_main.SetRow(1,  "Bid: " + dashes + " | Ask: " + dashes + " | Spread: " + dashes, CLR_TEXT);
+      g_main.SetRow(2,  "Regime: " + dashes, CLR_TEXT);
       g_main.SetRow(3,  "SIGNAL: " + dashes, CLR_DIM);
-      g_main.SetRow(4,  "Confidence: " + dashes, CLR_DIM);
-      g_main.SetRow(5,  "Entry: " + dashes, CLR_DIM);
-      g_main.SetRow(6,  "Stop Loss: " + dashes, CLR_DIM);
-      g_main.SetRow(7,  "Take Profit: " + dashes, CLR_DIM);
-      g_main.SetRow(8,  "Risk:Reward: " + dashes, CLR_DIM);
-      g_main.SetRow(9,  "Session: " + dashes, CLR_DIM);
+      g_main.SetRow(4,  "Confidence: " + dashes, CLR_TEXT);
+      g_main.SetRow(5,  "Entry: " + dashes, CLR_TEXT);
+      g_main.SetRow(6,  "Stop Loss: " + dashes, CLR_TEXT);
+      g_main.SetRow(7,  "Take Profit: " + dashes, CLR_TEXT);
+      g_main.SetRow(8,  "Risk:Reward: " + dashes, CLR_TEXT);
+      g_main.SetRow(9,  "Session: " + dashes, CLR_TEXT);
       g_main.SetRow(10, "STATUS: Incompatible chart - please attach to M5, M15 or M30", CLR_RED);
-      g_main.SetRow(11, "Today: " + dashes, CLR_DIM);
-      g_main.SetRow(12, "All Time: " + dashes, CLR_DIM);
+      g_main.SetRow(11, "Today: " + dashes, CLR_TEXT);
+      g_main.SetRow(12, "All Time: " + dashes, CLR_TEXT);
       g_main.Layout();
       return;
      }
@@ -204,11 +231,10 @@ void UpdateMainPanel(void)
    g_main.SetRow(1, "Bid: " + FmtPrice(bid) + " | Ask: " + FmtPrice(ask) +
                     " | Spread: " + IntegerToString(spread) + " pts", CLR_TEXT);
 
-   //--- regime (sample in phase 1; real engine in phase 2)
-   string regime = "TRENDING";
-   if(g_state == 1)
-      regime = "RANGING";
-   g_main.SetRow(2, "Regime: " + regime, CLR_TEXT);
+   //--- regime: REAL since Phase 2 (expanded, specific labels agreed
+   //--- with the owner - direction + strength, or where price sits in
+   //--- the range). Plain soft text: only SIGNAL/STATUS are coloured.
+   g_main.SetRow(2, "Regime: " + g_regime.Display(), CLR_TEXT);
 
    //--- signal + confidence
    string sig_txt;
@@ -222,10 +248,10 @@ void UpdateMainPanel(void)
 
    if(g_state == 1) // HOLD: no price plan rows
      {
-      g_main.SetRow(5, "Entry: " + GLYPH_DASH, CLR_DIM);
-      g_main.SetRow(6, "Stop Loss: " + GLYPH_DASH, CLR_DIM);
-      g_main.SetRow(7, "Take Profit: " + GLYPH_DASH, CLR_DIM);
-      g_main.SetRow(8, "Risk:Reward: " + GLYPH_DASH, CLR_DIM);
+      g_main.SetRow(5, "Entry: " + GLYPH_DASH, CLR_TEXT);
+      g_main.SetRow(6, "Stop Loss: " + GLYPH_DASH, CLR_TEXT);
+      g_main.SetRow(7, "Take Profit: " + GLYPH_DASH, CLR_TEXT);
+      g_main.SetRow(8, "Risk:Reward: " + GLYPH_DASH, CLR_TEXT);
      }
    else
      {
@@ -250,8 +276,12 @@ void UpdateMainPanel(void)
    g_main.SetRow(9, "Session: " + SessionName() + " | Expected Duration: " +
                     ExpectedDuration(), CLR_TEXT);
 
-   //--- status
-   g_main.SetRow(10, "STATUS: PHASE 1 UI PREVIEW - direction engine arrives in phase 2", CLR_ORANGE);
+   //--- status (coloured row): Phase 2 state in plain words
+   if(!g_symbol.Ready() || !g_regime.Ready())
+      g_main.SetRow(10, "STATUS: Calibrating - studying this symbol, collecting price history", CLR_ORANGE);
+   else
+      g_main.SetRow(10, "STATUS: Phase 2 live - " + g_symbol.ClassLabel() +
+                        " profile ready, regime live; signals still preview (Phase 3)", CLR_ORANGE);
 
    //--- counters (owner rule: Win = closed positive, Loss = closed negative, BE = zero)
    g_main.SetRow(11, "Today: Num of Signal: 0, Win: 0, Loss: 0, BE: 0", CLR_TEXT);
@@ -288,11 +318,12 @@ void UpdateLivePanel(void)
    g_live.SetRow(2, "Entry: " + FmtPrice(g_entry) + " " + ShortToString(0x2192) + " Now: " +
                     FmtPrice(bid) + "  (floating " + FmtUsd(fl) + ")", CLR_TEXT);
 
-   //--- Stop Loss row (owner asked for it) - shows the SL journey
+   //--- Stop Loss row (owner asked for it) - shows the SL journey.
+   //--- Plain soft text: only SIGNAL/STATUS rows carry colour.
    if(t < 6)
      {
       g_live.SetRow(3, "Stop Loss : " + FmtPrice(g_sl) + "  (initial)", CLR_TEXT);
-      g_live.SetRow(4, "Break-Even: not armed", CLR_DIM);
+      g_live.SetRow(4, "Break-Even: not armed", CLR_TEXT);
      }
    else
      {
@@ -302,9 +333,9 @@ void UpdateLivePanel(void)
       string be = "LOCKED";
       if(t < 8)
          be = "ARMED";
-      g_live.SetRow(4, "Break-Even: " + be, CLR_GREEN);
+      g_live.SetRow(4, "Break-Even: " + be, CLR_TEXT);
      }
-   g_live.SetRow(5, "Trail Stop: OFF (phase 2)", CLR_DIM);
+   g_live.SetRow(5, "Trail Stop: OFF (later phase)", CLR_TEXT);
 
    //--- TP ladder rows (owner's 60 / 80 / 100 idea)
    double prog = 0.0;
@@ -317,26 +348,26 @@ void UpdateLivePanel(void)
                        DoubleToString(prog, 0) + "% progress to target", CLR_TEXT);
    else
       g_live.SetRow(6, "TP1 " + FmtPrice(tp1) + " (60%) : " + GLYPH_CHECK +
-                       " HIT - closed 50% of lot", CLR_GREEN);
+                       " HIT - closed 50% of lot", CLR_TEXT);
 
    if(t < 16)
       g_live.SetRow(7, "TP2 " + FmtPrice(tp2) + " (80%) : pending", CLR_TEXT);
    else
       g_live.SetRow(7, "TP2 " + FmtPrice(tp2) + " (80%) : " + GLYPH_CHECK +
-                       " HIT - closed 30% of lot", CLR_GREEN);
+                       " HIT - closed 30% of lot", CLR_TEXT);
 
    if(t < 19)
       g_live.SetRow(8, "TP3 " + FmtPrice(tp3) + " (100%): pending", CLR_TEXT);
    else
       g_live.SetRow(8, "TP3 " + FmtPrice(tp3) + " (100%): " + GLYPH_CHECK +
-                       " HIT - closed 20% of lot", CLR_GREEN);
+                       " HIT - closed 20% of lot", CLR_TEXT);
 
    string st;
    if(t < 6)       st = "STATUS: Managing - running to TP1";
    else if(t < 12) st = "STATUS: Managing - running to TP2";
    else if(t < 16) st = "STATUS: Managing - running to TP3";
    else            st = "STATUS: Managing - ladder complete";
-   g_live.SetRow(9, st, CLR_TEXT);
+   g_live.SetRow(9, st, CLR_ORANGE);   // STATUS row: coloured by design
 
    g_live.Layout();
   }
@@ -392,6 +423,7 @@ int OnInit()
       Print("Autotrader: failed to create MAIN panel");
       return INIT_FAILED;
      }
+   g_main.SetSignalRow(3);   // SIGNAL row alone at 14pt (all else 12pt)
    if(!g_live.Create(0, 0, "ATR_L_", 10, live_sep, 15, 15))
      {
       Print("Autotrader: failed to create LIVE panel");
@@ -402,6 +434,7 @@ int OnInit()
    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
 
    g_state_started = TimeCurrent();
+   RefreshEngines(true);   // Phase 2: profile this symbol + first regime read
    BuildSampleSignal();
    UpdateUI();
 
@@ -417,6 +450,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    g_main.Destroy();
    g_live.Destroy();
+   ChartSetInteger(0, CHART_MOUSE_SCROLL, true);   // restore chart scroll
    ChartRedraw(0);
   }
 
@@ -434,8 +468,10 @@ void OnTick()
 void OnTimer()
   {
    g_timer_ticks++;
+   RefreshEngines(false);   // Phase 2: keep profile + regime current (5s)
    //--- cycle sample states every 20s so the owner can see
-   //    BUY -> HOLD -> SELL -> ... on the panel (phase 1 preview only)
+   //    BUY -> HOLD -> SELL -> ... on the panel (preview only, Phase 3
+   //    replaces these samples with the real direction engine)
    if(g_timer_ticks % 20 == 0)
      {
       g_state = (g_state + 1) % 3;
@@ -472,6 +508,10 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      }
 
    if(id == CHARTEVENT_CHART_CHANGE)
+     {
+      RefreshEngines(true);   // new TF/symbol context: re-study at once
+      BuildSampleSignal();
       UpdateUI();
+     }
   }
 //+------------------------------------------------------------------+

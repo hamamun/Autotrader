@@ -1,21 +1,28 @@
 //+------------------------------------------------------------------+
 //| Panel.mqh                                                         |
 //| Autotrader - panel engine (MAIN + LIVE TRADING).                   |
-//| Pixel-faithful dark panel: drag by header, auto-size, no truncate. |
+//| Soft eye-friendly dark-grey panel: drag by its title bar,          |
+//| auto-size to the widest row, no truncation.                        |
 //+------------------------------------------------------------------+
 #ifndef AUTOTRADER_PANEL_MQH
 #define AUTOTRADER_PANEL_MQH
 
-//--- palette (matches owner's reference screenshot)
-#define CLR_BG        C'18,18,18'
-#define CLR_HEADER_BG C'42,42,42'
-#define CLR_TEXT      C'214,214,214'
-#define CLR_TITLE     C'236,236,236'
-#define CLR_DIM       C'150,150,150'
-#define CLR_SEP       C'72,72,72'
-#define CLR_GREEN     C'52,190,100'
-#define CLR_RED       C'226,76,76'
-#define CLR_ORANGE    C'230,160,50'
+//--- palette: dark GREY body (never black), soft muted tones.
+//--- Only SIGNAL and STATUS rows are coloured (in Autotrader.mq5);
+//--- every other row uses the single soft CLR_TEXT below.
+#define CLR_BG        C'46,47,51'    // dark grey body - eye friendly
+#define CLR_HEADER_BG C'63,64,69'    // slightly lighter grey title/drag bar
+#define CLR_TEXT      C'192,197,204' // soft light grey (all normal rows)
+#define CLR_TITLE     C'208,212,217' // soft neutral title (still grey, not white)
+#define CLR_DIM       C'160,164,170' // soft muted grey (SIGNAL: HOLD)
+#define CLR_SEP       C'80,81,87'    // subtle separator on dark grey
+#define CLR_GREEN     C'106,191,125' // soft green  (SIGNAL: BUY / ok status)
+#define CLR_RED       C'218,118,112' // soft red    (SIGNAL: SELL / alert status)
+#define CLR_ORANGE    C'222,174,102' // soft amber  (STATUS)
+
+//--- font sizes (owner rule): everything 12, SIGNAL row 14
+#define FONT_SIZE_NORMAL 12
+#define FONT_SIZE_SIGNAL 14
 
 //--- glyphs (encoding-proof, via unicode code points)
 #define GLYPH_UP    ShortToString(0x25B2)  // triangle up
@@ -24,7 +31,7 @@
 #define GLYPH_CHECK ShortToString(0x2713)  // check mark
 
 //+------------------------------------------------------------------+
-//| One panel: header + fixed rows + separators.                      |
+//| One panel: title/drag bar + fixed rows + separators.              |
 //| Two instances = MAIN panel + LIVE TRADING panel.                  |
 //+------------------------------------------------------------------+
 class CInfoPanel
@@ -37,15 +44,21 @@ private:
    int               m_w, m_h;        // computed size (pixels)
    int               m_header_h;
    int               m_row_h;
+   int               m_row_h_signal;
    int               m_sep_h;
    int               m_pad;
-   int               m_font;
+   int               m_font;          // FONT_SIZE_NORMAL (12)
+   int               m_font_signal;   // FONT_SIZE_SIGNAL (14)
    string            m_font_name;
+   int               m_signal_row;    // row drawn at 14pt, or -1
    //--- rows
    int               m_row_count;
    string            m_rows[24];
    color             m_row_colors[24];
    bool              m_sep_after[24];
+   int               m_row_font[24];  // font size per row (12, signal=14)
+   int               m_row_box[24];   // pixel height of each row box
+   int               m_row_text_h[24];// measured pixel height of each row text
    //--- drag state
    bool              m_drag;
    int               m_grab_dx, m_grab_dy;
@@ -80,6 +93,8 @@ public:
    void              SetTitle(const string title);
    void              SetRow(const int idx, const string text, const color clr);
    void              SetSeparator(const int idx, const bool on);
+   void              SetRowFontSize(const int idx, const int size);
+   void              SetSignalRow(const int idx);   // row shown at 14pt
    void              Layout(void);          // auto-size + place
    void              Move(const int x, const int y);
    void              SetVisible(const bool vis);
@@ -107,21 +122,31 @@ CInfoPanel::CInfoPanel(void)
    m_row_count  = 0;
    m_drag       = false;
    m_grab_dx = m_grab_dy = 0;
-   m_font_name  = "Consolas";
+   m_signal_row = -1;
+   //--- soft, rounded, eye-friendly UI font (ships with Windows/MT5).
+   //--- (Consolas was monospace and sharp/hard on the eyes.)
+   m_font_name  = "Segoe UI";
    m_scale      = 1.0;
    int dpi = (int)TerminalInfoInteger(TERMINAL_SCREEN_DPI);
    if(dpi > 0)
       m_scale = dpi / 96.0;
-   m_font      = (int)MathRound(9 * m_scale);
-   m_header_h  = (int)MathRound(22 * m_scale);
-   m_row_h     = (int)MathRound(18 * m_scale);
-   m_sep_h     = (int)MathRound(3 * m_scale);
-   m_pad       = (int)MathRound(10 * m_scale);
+   //--- font SIZES are exactly 12 / 14pt as requested; only the pixel
+   //--- row heights/padding below are DPI-scaled, never the pt sizes.
+   m_font         = FONT_SIZE_NORMAL;
+   m_font_signal  = FONT_SIZE_SIGNAL;
+   m_header_h     = Scale(34);   // title row lives INSIDE this bar
+   m_row_h        = Scale(25);   // room for 12pt text + breathing space
+   m_row_h_signal = Scale(31);   // room for 14pt SIGNAL text
+   m_sep_h        = Scale(4);
+   m_pad          = Scale(12);
    for(int i = 0; i < 24; i++)
      {
       m_rows[i]       = "";
       m_row_colors[i] = CLR_TEXT;
       m_sep_after[i]  = false;
+      m_row_font[i]   = m_font;
+      m_row_box[i]    = m_row_h;
+      m_row_text_h[i] = Scale(16);
      }
   }
 
@@ -164,7 +189,7 @@ bool CInfoPanel::Create(const long chart_id, const int subwin,
    ObjectSetInteger(m_chart, BgName(), OBJPROP_SELECTABLE, false);
    ObjectSetInteger(m_chart, BgName(), OBJPROP_HIDDEN, true);
 
-   //--- header (drag bar)
+   //--- header / title bar (the drag handle - title text sits in it)
    if(!ObjectCreate(m_chart, HeaderName(), OBJ_RECTANGLE_LABEL, m_subwin, 0, 0))
       return false;
    ObjectSetInteger(m_chart, HeaderName(), OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -184,7 +209,7 @@ bool CInfoPanel::Create(const long chart_id, const int subwin,
       ObjectSetInteger(m_chart, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
       ObjectSetInteger(m_chart, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
       ObjectSetString(m_chart, name, OBJPROP_FONT, m_font_name);
-      ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, m_font);
+      ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, m_row_font[i]);
       ObjectSetInteger(m_chart, name, OBJPROP_COLOR, CLR_TEXT);
       ObjectSetInteger(m_chart, name, OBJPROP_BACK, false);
       ObjectSetInteger(m_chart, name, OBJPROP_SELECTABLE, false);
@@ -214,13 +239,18 @@ bool CInfoPanel::Create(const long chart_id, const int subwin,
 //+------------------------------------------------------------------+
 void CInfoPanel::Destroy(void)
   {
-   if(m_chart != 0 && m_prefix != "")
+   if(m_drag)   // never leave the chart's mouse-scroll locked off
+     {
+      ChartSetInteger(m_chart, CHART_MOUSE_SCROLL, true);
+      m_drag = false;
+     }
+   if(m_prefix != "")   // chart id 0 = current chart, still delete
       ObjectsDeleteAll(m_chart, m_prefix);
    m_row_count = 0;
   }
 
 //+------------------------------------------------------------------+
-//| set header title                                                  |
+//| set header title (drawn inside the title/drag bar, row 0)         |
 //+------------------------------------------------------------------+
 void CInfoPanel::SetTitle(const string title)
   {
@@ -248,17 +278,56 @@ void CInfoPanel::SetSeparator(const int idx, const bool on)
   }
 
 //+------------------------------------------------------------------+
+//| set one row's font size (points)                                  |
+//+------------------------------------------------------------------+
+void CInfoPanel::SetRowFontSize(const int idx, const int size)
+  {
+   if(idx < 0 || idx >= 24 || size <= 0)
+      return;
+   m_row_font[idx] = size;
+   if(m_row_count > 0 && ObjectFind(m_chart, RowName(idx)) >= 0)
+      ObjectSetInteger(m_chart, RowName(idx), OBJPROP_FONTSIZE, size);
+  }
+
+//+------------------------------------------------------------------+
+//| mark a row as the SIGNAL row: it alone is drawn at 14pt           |
+//+------------------------------------------------------------------+
+void CInfoPanel::SetSignalRow(const int idx)
+  {
+   if(idx < 0 || idx >= 24)
+      return;
+   if(m_signal_row >= 0 && m_signal_row != idx)
+      SetRowFontSize(m_signal_row, m_font);
+   m_signal_row = idx;
+   SetRowFontSize(idx, m_font_signal);
+   if(m_row_count > 0)
+      Layout();
+  }
+
+//+------------------------------------------------------------------+
 //| auto-size to content + place everything                           |
 //+------------------------------------------------------------------+
 void CInfoPanel::Layout(void)
   {
-   //--- measure widest text (title + rows) -> panel never truncates
-   TextSetFont(m_font_name, m_font, 0);   // measure with the same font we draw with
+   if(m_row_count <= 0)
+      return;
+
+   //--- Measure EVERY row with the exact font/size it is drawn with.
+   //--- TextSetFont must be given -10 x the OBJ_LABEL point size
+   //--- (MQL5 docs), otherwise the measured width is far too small
+   //--- and the panel ends up narrower than its own text - that was
+   //--- the "width does not cover the text" bug. Measuring per row
+   //--- also makes the 14pt SIGNAL row widen the panel correctly.
    int  max_w = 0;
    uint tw = 0, th = 0;
    for(int i = 0; i < m_row_count; i++)
      {
+      TextSetFont(m_font_name, -m_row_font[i] * 10);
       TextGetSize(m_rows[i], tw, th);
+      m_row_text_h[i] = (int)th;
+      m_row_box[i]    = (i == 0) ? m_header_h
+                                 : ((m_row_font[i] > m_font) ? m_row_h_signal
+                                                             : m_row_h);
       if((int)tw > max_w)
          max_w = (int)tw;
      }
@@ -268,8 +337,15 @@ void CInfoPanel::Layout(void)
       if(m_sep_after[i])
          seps++;
 
-   m_w = max_w + 2 * m_pad;
-   m_h = m_header_h + m_row_count * m_row_h + seps * m_sep_h;
+   //--- dynamic width: widest measured row + padding + safety slack,
+   //--- so the last glyph can never touch or cross the panel edge.
+   m_w = max_w + 2 * m_pad + Scale(14);
+
+   //--- height: title bar (row 0 lives in it) + body rows + separators
+   m_h = m_header_h;
+   for(int i = 1; i < m_row_count; i++)
+      m_h += m_row_box[i];
+   m_h += seps * m_sep_h;
 
    PlaceObjects();
   }
@@ -279,7 +355,7 @@ void CInfoPanel::Layout(void)
 //+------------------------------------------------------------------+
 void CInfoPanel::PlaceObjects(void)
   {
-   //--- background + header
+   //--- background + header/title bar
    ObjectSetInteger(m_chart, BgName(), OBJPROP_XDISTANCE, m_x);
    ObjectSetInteger(m_chart, BgName(), OBJPROP_YDISTANCE, m_y);
    ObjectSetInteger(m_chart, BgName(), OBJPROP_XSIZE, m_w);
@@ -290,17 +366,29 @@ void CInfoPanel::PlaceObjects(void)
    ObjectSetInteger(m_chart, HeaderName(), OBJPROP_XSIZE, m_w);
    ObjectSetInteger(m_chart, HeaderName(), OBJPROP_YSIZE, m_header_h);
 
-   //--- rows
-   int y = m_y + m_header_h;
+   int y = m_y + m_header_h;   // first body row starts under the bar
+
    for(int i = 0; i < m_row_count; i++)
      {
       string name = RowName(i);
       ObjectSetString(m_chart, name, OBJPROP_TEXT, m_rows[i]);
       ObjectSetInteger(m_chart, name, OBJPROP_COLOR, m_row_colors[i]);
+      ObjectSetInteger(m_chart, name, OBJPROP_FONTSIZE, m_row_font[i]);
       ObjectSetInteger(m_chart, name, OBJPROP_XDISTANCE, m_x + m_pad);
-      ObjectSetInteger(m_chart, name, OBJPROP_YDISTANCE,
-                       y + (m_row_h - (int)MathRound(13 * m_scale)) / 2);
-      y += m_row_h;
+      if(i == 0)
+        {
+         //--- title centred vertically INSIDE the title/drag bar, so
+         //--- the text the user sees (and grabs) IS the drag handle.
+         int ty = m_y + (m_header_h - m_row_text_h[0]) / 2;
+         ObjectSetInteger(m_chart, name, OBJPROP_YDISTANCE,
+                          (ty > m_y) ? ty : m_y);
+        }
+      else
+        {
+         ObjectSetInteger(m_chart, name, OBJPROP_YDISTANCE,
+                          y + (m_row_box[i] - m_row_text_h[i]) / 2);
+         y += m_row_box[i];
+        }
 
       if(m_sep_after[i])
         {
@@ -343,7 +431,7 @@ void CInfoPanel::SetVisible(const bool vis)
   }
 
 //+------------------------------------------------------------------+
-//| header hit test                                                   |
+//| header hit test - the title/drag bar across the full panel width  |
 //+------------------------------------------------------------------+
 bool CInfoPanel::InHeader(const int mx, const int my) const
   {
@@ -351,7 +439,10 @@ bool CInfoPanel::InHeader(const int mx, const int my) const
   }
 
 //+------------------------------------------------------------------+
-//| drag handling: press on header + move = drag panel                 |
+//| Drag handling: press on the title bar + move = drag the panel.    |
+//| While dragging, chart mouse-scroll is locked so the chart does    |
+//| not slide away under the panel (that made drags feel broken);     |
+//| it is restored the moment the button is released.                 |
 //+------------------------------------------------------------------+
 bool CInfoPanel::HandleEvent(const int id, const long &lparam,
                              const double &dparam, const string &sparam)
@@ -366,7 +457,11 @@ bool CInfoPanel::HandleEvent(const int id, const long &lparam,
 
    if(!lmb)
      {
-      m_drag = false;
+      if(m_drag)
+        {
+         m_drag = false;
+         ChartSetInteger(m_chart, CHART_MOUSE_SCROLL, true);
+        }
       return false;
      }
 
@@ -377,6 +472,7 @@ bool CInfoPanel::HandleEvent(const int id, const long &lparam,
       m_drag    = true;
       m_grab_dx = mx - m_x;
       m_grab_dy = my - m_y;
+      ChartSetInteger(m_chart, CHART_MOUSE_SCROLL, false);
      }
 
    Move(mx - m_grab_dx, my - m_grab_dy);

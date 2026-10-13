@@ -1,7 +1,9 @@
 # AUTOTRADER — Master Build Plan v3 (pure MQL5)
 
-> Status: interface & rules design locked with owner decisions (12 Oct 2026).
-> Next step: Phase 1 — panel build. No code written yet.
+> Status: Phase 1 (interface) built 12 Oct 2026; Phase 2 (Symbol Intelligence
+> + Regime engine) built 13 Oct 2026, including the owner's expanded,
+> specific Regime labels and the soft eye-friendly interface style.
+> Next step: Phase 3 — direction engine.
 
 ---
 
@@ -80,6 +82,9 @@ Panel life-cycle of the SL (visible in LIVE TRADING panel):
 | 9 | Two display states: **SIGNAL view** (no open order) and **LIVE TRADING panel** (appears when an order is placed). TP-ladder detail lives in the LIVE TRADING panel. |
 | 10 | **Text must never truncate or overlap.** Panel auto-sizes to content and is **draggable**. |
 | 11 | Counters: Win / Loss / BE exactly as section 1 example. |
+| 12 | Interface style (13 Oct 2026): dark-**grey** body (not black), soft **Segoe UI**, **12pt all rows / 14pt SIGNAL row only**, soft muted colours, and **only SIGNAL + STATUS rows are coloured** — everything else one soft grey. Drag by the title bar; width auto-grows to the widest row. |
+| 13 | **Symbol Intelligence (Phase 2):** zero extra inputs — the EA studies any symbol it is attached to (family, price format, normal wiggle, usual spread, current jumpiness) and auto-sets its hidden dials (stop/target distances, proof threshold, spread limit) relative to what is normal *for that symbol*. |
+| 14 | **Regime labels must be SPECIFIC (13 Oct 2026):** never a bare TRENDING/RANGING. The row must say direction + strength, or where price sits in the range (full agreed list in 3.5). Regime row stays plain soft text (decision #12). |
 
 ---
 
@@ -208,6 +213,51 @@ the panel shows **row labels only, no values**, and STATUS names the problem.
 (Exact fit of long messages is handled by the auto-size logic — the panel
 widens itself; text is never clipped.)
 
+### 3.5 Regime row — expanded specific labels (owner-agreed 13 Oct 2026, BUILT in Phase 2)
+
+The Regime row always answers: *what is the market doing + which
+direction/where + how strong/clear is it?* Symbols are drawn from unicode
+code points (as with ▲▼✓) so they render in the panel font on MT5/Windows.
+
+| Display | Meaning |
+|---|---|
+| `▲ TRENDING UP — Strong` / `— Weak/Early` | uptrend, clean or just starting |
+| `▼ TRENDING DOWN — Strong` / `— Weak/Early` | downtrend, clean or just starting |
+| `↩ PULLBACK in UPTREND` | main trend UP, temporary fall against it |
+| `↪ PULLBACK in DOWNTREND` | main trend DOWN, temporary bounce against it |
+| `↔ RANGING — price at range TOP` | sideways, near resistance |
+| `↔ RANGING — price at range BOTTOM` | sideways, near support |
+| `↔ RANGING — price in MIDDLE` | sideways, no edge (HOLD territory) |
+| `⚠ VOLATILE — fast swings both ways` | chaotic expansion, protection mode |
+| `● QUIET — flat, compressed` | very low movement, waiting for expansion |
+| `? TRANSITION — direction unclear` | old trend weakening, new one unconfirmed |
+| `● CALIBRATING — collecting price history` | not enough bars yet after attach |
+
+Classification method (RegimeEngine.mqh, closed bars only, no repaint):
+direction agreement of five witnesses (close vs EMA50, EMA20 vs EMA50,
+EMA50 slope, higher-high/higher-low structure, close vs EMA100), trend
+efficiency ratio, current ATR vs its own longer-run normal, and position
+inside the recent 60-bar range. Safety states (VOLATILE/QUIET) are checked
+first; a fast one-directional move is a strong trend, not "volatile".
+
+### 3.6 Symbol Intelligence (Phase 2, BUILT — internal, no new panel rows)
+
+On attach and every ~5s afterwards (SymbolIntelligence.mqh) the EA builds
+a profile card for the chart symbol: family (Forex/Metal/Crypto/Index/
+Energy/Other, from the symbol name + broker contract mode), digits/point/
+tick size+value/contract size/volume limits, live-sampled typical spread,
+and behaviour on the chart TF (current ATR vs longer-run normal, average
+swing). From that profile it derives its hidden dials — SL/TP distances as
+multiples of the symbol's own ATR (calmer family = tighter, jumpier =
+wider), confidence threshold (≈85 calm forex → ≈90+ crypto/volatile),
+"spread too expensive" limit (≈2.5× typical spread) and the 1% risk
+baseline. Jumpy-right-now (ATR ≫ its own normal) widens the stop dial and
+raises the proof threshold automatically. These dials feed Phase 3/4;
+in Phase 2 they already scale the preview Entry/SL/TP distances, and the
+STATUS row reports `<Family> profile ready` (or "Calibrating…" while
+history is short). No panel rows were added — the locked interface in
+3.2/3.3 is unchanged apart from the Regime/STATUS text itself.
+
 Note: even on an M5 chart, the engine internally reads all three timeframes
 (M30 bias → M15 setup → M5 trigger). The chart's TF decides which
 **direction product** the panel reports:
@@ -328,8 +378,8 @@ lets us audit the 98% at any time.
 
 | Phase | Deliverable | Notes |
 |-------|-------------|-------|
-| 1 | MAIN + LIVE TRADING panels, exact look, drag + auto-size, live quotes, sample states (incl. incompatible chart view) | **BUILT** — in `MQL5/`, awaiting owner approval of the look. Preview cycles BUY→HOLD→SELL every ~20s |
-| 2 | Symbol Intelligence + Regime Engine | "any chart, any symbol" foundation |
+| 1 | MAIN + LIVE TRADING panels, exact look, drag + auto-size, live quotes, sample states (incl. incompatible chart view) | **BUILT** — in `MQL5/`. Preview cycles BUY→HOLD→SELL every ~20s. Look revised 13 Oct 2026 (soft/dark-grey, 12/14pt, drag + width fixes, decision #12) |
+| 2 | Symbol Intelligence + Regime Engine | **BUILT** 13 Oct 2026 — `SymbolIntelligence.mqh` + `RegimeEngine.mqh`; Regime row live with the expanded labels (3.5), profile dials auto-set (3.6). Signals still preview until Phase 3 |
 | 3 | Direction engine (M30→M15→M5) + Confidence % | BUY/SELL/HOLD live |
 | 4 | Trade engine: entry rules + SL logic + TP ladder + break-even + management (LIVE panel goes live-live) | owner's TP idea |
 | 5 | Safety layer: news, spread, daily loss, restart-restore | |
