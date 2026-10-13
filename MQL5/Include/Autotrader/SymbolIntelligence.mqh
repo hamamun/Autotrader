@@ -79,6 +79,13 @@ bool AT_Has(const string haystack, const string needle)
    return (StringFind(haystack, needle) >= 0);
   }
 
+bool AT_IsMajorCurrency(const string code)
+  {
+   return (code == "USD" || code == "EUR" || code == "GBP" ||
+           code == "JPY" || code == "AUD" || code == "NZD" ||
+           code == "CAD" || code == "CHF");
+  }
+
 ENUM_AT_SYMBOL_CLASS AT_DetectClass(const string symbol)
   {
    string s = AT_Upper(symbol);
@@ -112,20 +119,10 @@ ENUM_AT_SYMBOL_CLASS AT_DetectClass(const string symbol)
       return AT_CLASS_INDEX;
 
    //--- forex: two known currency codes back to back (e.g. EURUSDm)
-   string majors[8] = {"USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"};
-   if(StringLen(s) >= 6)
-     {
-      string a = StringSubstr(s, 0, 3);
-      string b = StringSubstr(s, 3, 3);
-      bool a_ok = false, b_ok = false;
-      for(int i = 0; i < 8; i++)
-        {
-         if(a == majors[i]) a_ok = true;
-         if(b == majors[i]) b_ok = true;
-        }
-      if(a_ok && b_ok)
-         return AT_CLASS_FOREX;
-     }
+   if(StringLen(s) >= 6 &&
+      AT_IsMajorCurrency(StringSubstr(s, 0, 3)) &&
+      AT_IsMajorCurrency(StringSubstr(s, 3, 3)))
+      return AT_CLASS_FOREX;
 
    //--- broker says it is a forex-style contract
    ENUM_SYMBOL_CALC_MODE mode =
@@ -177,15 +174,40 @@ public:
    double            SlMult(void)             const { return m_profile.sl_mult; }
    double            TpMult(void)             const { return m_profile.tp_mult; }
    int               ConfidenceThreshold(void) const { return m_profile.confidence_threshold; }
-   SATSymbolProfile  Profile(void)            const { return m_profile; }
+   //--- note: no whole-struct getter - callers use the typed getters
+   //--- above (keeps this header to plain, portable MQL5 constructs)
   };
 
 //+------------------------------------------------------------------+
 CSymbolIntelligence::CSymbolIntelligence(void)
   {
-   ZeroMemory(m_profile);
+   //--- explicit init (no ZeroMemory on a struct containing strings)
    m_profile.ready = false;
+   m_profile.symbol = "";
+   m_profile.symbol_class = AT_CLASS_OTHER;
    m_profile.class_label = "Other";
+   m_profile.digits = 0;
+   m_profile.point = 0.0;
+   m_profile.tick_size = 0.0;
+   m_profile.tick_value = 0.0;
+   m_profile.contract_size = 0.0;
+   m_profile.volume_min = 0.0;
+   m_profile.volume_max = 0.0;
+   m_profile.volume_step = 0.0;
+   m_profile.spread_now_pts = 0;
+   m_profile.spread_typical_pts = 0.0;
+   m_profile.atr_price = 0.0;
+   m_profile.atr_baseline = 0.0;
+   m_profile.atr_ratio = 0.0;
+   m_profile.atr_pct = 0.0;
+   m_profile.swing_price = 0.0;
+   m_profile.bars_used = 0;
+   m_profile.updated = 0;
+   m_profile.sl_mult = 0.0;
+   m_profile.tp_mult = 0.0;
+   m_profile.confidence_threshold = 0;
+   m_profile.spread_limit_pts = 0.0;
+   m_profile.risk_pct = 0.0;
    m_spread_sum = 0.0;
    m_spread_samples = 0;
   }

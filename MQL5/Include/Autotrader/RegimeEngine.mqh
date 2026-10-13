@@ -100,17 +100,23 @@ public:
    ENUM_AT_REGIME    Kind(void)       const { return m_info.kind; }
    int               Direction(void)  const { return m_info.direction; }
    string            Display(void)    const { return m_info.display; }
-   SATRegimeInfo     Info(void)       const { return m_info; }
+   //--- note: no whole-struct getter - callers use the typed getters
+   //--- above (keeps this header to plain, portable MQL5 constructs)
   };
 
 //+------------------------------------------------------------------+
 CRegimeEngine::CRegimeEngine(void)
   {
-   ZeroMemory(m_info);
+   //--- explicit init (no ZeroMemory on a struct containing a string)
    m_info.ready = false;
    m_info.kind = AT_REGIME_CALIBRATING;
+   m_info.direction = 0;
    m_info.display = GLYPH_DOT + " CALIBRATING " + GLYPH_DASH +
                     " collecting price history";
+   m_info.efficiency = 0.0;
+   m_info.atr_ratio = 0.0;
+   m_info.range_pos = 0.5;
+   m_info.bars_used = 0;
   }
 
 void CRegimeEngine::SetInfo(const ENUM_AT_REGIME kind, const int dir,
@@ -247,7 +253,7 @@ bool CRegimeEngine::Refresh(const string symbol, const ENUM_TIMEFRAMES tf)
       l20 = MathMin(l20, rates[i].low);
      }
    double range20 = h20 - l20;
-   if(m_info.atr_ratio <= 0.62 && m_info.efficiency < 0.30 && range20 <= 3.0 * atr)
+   if(m_info.atr_ratio <= 0.62 && m_info.efficiency < 0.30 && range20 <= 5.0 * atr)
      {
       SetInfo(AT_REGIME_QUIET, 0,
               GLYPH_DOT + " QUIET " + GLYPH_DASH + " flat, compressed");
@@ -285,24 +291,26 @@ bool CRegimeEngine::Refresh(const string symbol, const ENUM_TIMEFRAMES tf)
       return true;
      }
 
-   //--- RANGING: not trending - say WHERE price is inside the range
-   if(m_info.efficiency < 0.34 || MathAbs(score) <= 2)
+   //--- TRANSITION: price HAS moved (not flat/range-like) but the
+   //--- direction witnesses disagree - genuinely unclear. (Checked
+   //--- before RANGING so this state is actually reachable.)
+   if(m_info.efficiency >= 0.30 && MathAbs(score) <= 2)
      {
-      if(m_info.range_pos >= 0.80)
-         SetInfo(AT_REGIME_RANGE_TOP, 0,
-                 GLYPH_SIDE + " RANGING " + GLYPH_DASH + " price at range TOP");
-      else if(m_info.range_pos <= 0.20)
-         SetInfo(AT_REGIME_RANGE_BOTTOM, 0,
-                 GLYPH_SIDE + " RANGING " + GLYPH_DASH + " price at range BOTTOM");
-      else
-         SetInfo(AT_REGIME_RANGE_MIDDLE, 0,
-                 GLYPH_SIDE + " RANGING " + GLYPH_DASH + " price in MIDDLE");
+      SetInfo(AT_REGIME_TRANSITION, 0,
+              "? TRANSITION " + GLYPH_DASH + " direction unclear");
       return true;
      }
 
-   //--- anything left is genuinely unclear
-   SetInfo(AT_REGIME_TRANSITION, 0,
-           "? TRANSITION " + GLYPH_DASH + " direction unclear");
+   //--- RANGING: not trending - say WHERE price is inside the range
+   if(m_info.range_pos >= 0.80)
+      SetInfo(AT_REGIME_RANGE_TOP, 0,
+              GLYPH_SIDE + " RANGING " + GLYPH_DASH + " price at range TOP");
+   else if(m_info.range_pos <= 0.20)
+      SetInfo(AT_REGIME_RANGE_BOTTOM, 0,
+              GLYPH_SIDE + " RANGING " + GLYPH_DASH + " price at range BOTTOM");
+   else
+      SetInfo(AT_REGIME_RANGE_MIDDLE, 0,
+              GLYPH_SIDE + " RANGING " + GLYPH_DASH + " price in MIDDLE");
    return true;
   }
 
