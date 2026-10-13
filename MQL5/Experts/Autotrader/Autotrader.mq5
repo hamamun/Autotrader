@@ -18,10 +18,14 @@
 //--- the only user input (owner decision)
 input bool InpAutoTrading = true; // Auto Trading
 
-//--- panels
-CInfoPanel g_main;                       // MAIN panel (signal view)
-CInfoPanel g_live;                       // LIVE TRADING panel (open order)
-bool       g_compatible_tf = true;       // chart TF is M5 / M15 / M30
+//--- panels and Phase 2 engines
+CInfoPanel          g_main;               // MAIN panel (signal view)
+CInfoPanel          g_live;               // LIVE TRADING panel (open order)
+CSymbolIntelligence g_symbol;             // symbol profile + adaptive dials
+CRegimeEngine       g_regime;             // current market regime
+
+datetime   g_engines_at    = 0;           // last Phase 2 refresh time
+bool       g_compatible_tf = true;        // chart TF is M5 / M15 / M30
 int        g_timer_ticks   = 0;          // preview cycle timer
 int        g_state         = 0;          // 0=BUY 1=HOLD 2=SELL (preview)
 datetime   g_state_started;              // when current preview state began
