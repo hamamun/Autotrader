@@ -1,37 +1,55 @@
+ime exit, restart restore.        |
+//| Phase 5: Safety layer - permissions, stale quotes, spread, news,  |
+//|          gap shock, daily loss stand-down, equity floor.          |
+//| Phase 6: Auto-execution + the owner's Win/Loss/BE scoreboard and  |
+//|          the CSV audit trail.                                     |
+//|                                                                   |
+//| The only input is Auto Trading ON/OFF. Everything else is decided |
+//| by the EA from the symbol it is attached to and the market itself.|
 //+------------------------------------------------------------------+
-//| Autotrader.mq5                                                    |
-//| Autotrader - fully automatic MT5 trading EA.                      |
-//| Phase 1: interface (MAIN + LIVE TRADING panels) - soft eye-       |
-//|          friendly look, drag by title bar, auto-size, live quotes, |
-//|          preview states.                                           |
-//| Phase 2: Symbol Intelligence + Regime engine (live, see below).    |
-//| Phase 3+: direction engine, trading.                               |
-//+------------------------------------------------------------------+
-#property copyright "Autotrader"
-#property version   "1.00"
-#property description "Autotrader - automated MT5 trading EA (Phase 2: symbol intelligence + regime engine)"
+#property copyright   "Autotrader"
+#property version     "1.00"
+#property description "Autotrader - fully automatic MT5 EA (Phases 1-6: panels, symbol intelligence, regime, direction engine, trade engine, safety, scoreboard)"
 
 #include <Autotrader/Panel.mqh>
 #include <Autotrader/SymbolIntelligence.mqh>
+#include <Autotrader/MarketData.mqh>
 #include <Autotrader/RegimeEngine.mqh>
+#include <Autotrader/ModernIndicators.mqh>
+#include <Autotrader/SmartMoney.mqh>
+#include <Autotrader/VolumeFlow.mqh>
+#include <Autotrader/DirectionEngine.mqh>
+#include <Autotrader/SafetyManager.mqh>
+#include <Autotrader/StatsKeeper.mqh>
+#include <Autotrader/TradeEngine.mqh>
 
 //--- the only user input (owner decision)
 input bool InpAutoTrading = true; // Auto Trading
 
-//--- panels and Phase 2 engines
-CInfoPanel          g_main;               // MAIN panel (signal view)
-CInfoPanel          g_live;               // LIVE TRADING panel (open order)
-CSymbolIntelligence g_symbol;             // symbol profile + adaptive dials
-CRegimeEngine       g_regime;             // current market regime
+//--- panels
+CInfoPanel          g_main;      // MAIN panel (signal view)
+CInfoPanel          g_live;      // LIVE TRADING panel (real open order)
+//--- brains
+CSymbolIntelligence g_symbol;    // symbol profile + adaptive dials
+CDirectionEngine    g_dir;       // the judge: BUY / SELL / HOLD + confidence
+CSafetyManager      g_safety;    // freeze conditions
+CStatsKeeper        g_stats;     // Win/Loss/BE scoreboard + CSV audit
+CTradeEngine        g_trade;     // entries, ladder, break-even, restore
 
-datetime   g_engines_at    = 0;           // last Phase 2 refresh time
-bool       g_compatible_tf = true;        // chart TF is M5 / M15 / M30
-int        g_timer_ticks   = 0;          // preview cycle timer
-int        g_state         = 0;          // 0=BUY 1=HOLD 2=SELL (preview)
-datetime   g_state_started;              // when current preview state began
-double     g_entry, g_sl, g_tp, g_lots;  // sample signal values
-int        g_confidence    = 0;
-int        g_live_gap      = 10;         // px between MAIN and LIVE panels
+//--- state
+bool     g_compatible_tf = true;    // chart TF is M5 / M15 / M30
+ulong    g_magic          = 0;      // auto-derived, per symbol + timeframe
+int      g_live_gap       = 10;     // px between MAIN and LIVE panels
+datetime g_last_brains    = 0;      // throttle: direction engine (1s)
+datetime g_last_profile   = 0;      // throttle: symbol profile (5s)
+datetime g_last_latch     = 0;      // latch time we already counted
+datetime g_last_fail      = 0;      // order-failure cooldown
+datetime g_last_audit_bar = 0;      // audit line printed once per lane bar
+bool     g_had_trade      = false;  // to notice a trade finishing
+bool     g_live_shown     = false;  // LIVE panel visibility, cached
+datetime g_last_gap_bar   = 0;      // gap check runs once per lane bar
+double   g_disp_lots      = 0.0;    // cached display lot size
+datetime g_disp_lots_at   = 0;
 
 //+------------------------------------------------------------------+
 //| formatting helpers                                                |
@@ -55,12 +73,12 @@ string FmtPts(const double price_diff)
    return IntegerToString(pts) + " pts";
   }
 
-//--- estimated money for a price move, sample lot 0.10
+//--- what a price move is worth in money for a given lot size
 double EstUsd(const double price_diff, const double lots)
   {
    double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   if(tick_size <= 0.0)
+   if(tick_size <= 0.0 || tick_value <= 0.0)
       return 0.0;
    return price_diff / tick_size * tick_value * lots;
   }
@@ -85,19 +103,7 @@ string TFName(void)
      }
   }
 
-//--- expected duration text per chart TF (info only)
-string ExpectedDuration(void)
-  {
-   switch((ENUM_TIMEFRAMES)Period())
-     {
-      case PERIOD_M5:  return "~1-4 hours";
-      case PERIOD_M15: return "~2-8 hours";
-      case PERIOD_M30: return "~5-16 hours";
-      default:         return "~-";
-     }
-  }
-
-//--- session name from server time (info only - never blocks trading)
+//--- session name from server time (information only - never blocks)
 string SessionName(void)
   {
    MqlDateTime dt;
@@ -117,80 +123,254 @@ string HmOf(const datetime t)
    string hh = IntegerToString(dt.hour);
    string mm = IntegerToString(dt.min);
    if(dt.hour < 10) hh = "0" + hh;
-   if(dt.min < 10)  mm = "0" + mm;
+   if(dt.min  < 10) mm = "0" + mm;
    return hh + ":" + mm;
   }
 
-string HmNow(void)
+//--- "Expected Duration" is now computed from the target distance and
+//--- this symbol's own speed, not a fixed phrase (Phase 3)
+string DurationText(const int minutes)
   {
-   return HmOf(TimeCurrent());
+   if(minutes <= 0)
+      return "~-";
+   double lo = (double)minutes * 0.60 / 60.0;
+   double hi = (double)minutes * 1.60 / 60.0;
+   if(hi < 1.0)
+      return "~" + IntegerToString((int)MathRound(lo * 60.0)) + "-" +
+             IntegerToString((int)MathRound(hi * 60.0)) + " minutes";
+   int dp_lo = (lo < 10.0) ? 1 : 0;
+   int dp_hi = (hi < 10.0) ? 1 : 0;
+   return "~" + DoubleToString(lo, dp_lo) + "-" + DoubleToString(hi, dp_hi) + " hours";
   }
 
-//--- average bar range in price units (volatility proxy for sample numbers)
-double AvgRangePrice(void)
+//--- how old is the broker's last quote?
+int QuoteAgeSec(void)
   {
-   MqlRates rates[];
-   int n = CopyRates(_Symbol, (ENUM_TIMEFRAMES)Period(), 1, 30, rates);
-   if(n <= 0)
-      return 100 * _Point;
-   double sum = 0.0;
-   for(int i = 0; i < n; i++)
-      sum += (rates[i].high - rates[i].low);
-   double avg = sum / n;
-   return (avg > 0 ? avg : 100 * _Point);
+   datetime t = (datetime)SymbolInfoInteger(_Symbol, SYMBOL_TIME);
+   if(t <= 0)
+      return 0;
+   datetime now = TimeCurrent();
+   if(now <= t)
+      return 0;
+   return (int)(now - t);
   }
 
-//+------------------------------------------------------------------+
-//| Phase 2 engines: study the symbol + classify the regime.          |
-//| Refreshed on a timer (history copies are too heavy for every      |
-//| tick); the panel quotes themselves still update every tick.       |
-//+------------------------------------------------------------------+
-void RefreshEngines(const bool force)
+//--- the lot size the EA would use right now (also used for the panel's
+//--- USD estimates, so what you read is what would really be traded).
+//--- Cached for a few seconds: it calls the broker's margin maths.
+double DisplayLots(void)
   {
    datetime now = TimeCurrent();
-   if(!force && g_engines_at > 0 && now - g_engines_at < 5)
-      return;
-   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
-   g_symbol.Refresh(_Symbol, tf);
-   g_regime.Refresh(_Symbol, tf);
-   g_engines_at = now;
+   if(g_disp_lots > 0.0 && g_disp_lots_at > 0 && now - g_disp_lots_at < 5)
+      return g_disp_lots;
+   double lots = g_trade.CalcLots(g_dir.SlDist(), g_symbol.RiskPct(), g_dir.LaneAtr());
+   if(lots <= 0.0)
+      lots = g_symbol.VolumeMin();
+   if(lots <= 0.0)
+      lots = 0.10;
+   g_disp_lots = lots;
+   g_disp_lots_at = now;
+   return lots;
+  }
+
+//--- a level that is not known yet is printed as a dash, never as 0
+string FmtLevel(const double v)
+  {
+   return (v > 0.0) ? FmtPrice(v) : GLYPH_DASH;
   }
 
 //+------------------------------------------------------------------+
-//| build one preview signal (sample values - real direction engine   |
-//| arrives in Phase 3; distances already use the Phase 2 profile:    |
-//| the symbol's own typical wiggle x its auto-set dials)             |
+//| magic number: derived from the symbol + timeframe, so it is the   |
+//| same after every restart (that is what makes restore possible),   |
+//| and every chart lane stays isolated from the others and from any  |
+//| manual trade.                                                     |
 //+------------------------------------------------------------------+
-void BuildSampleSignal(void)
+ulong DeriveMagic(void)
   {
-   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double range = (g_symbol.Ready() && g_symbol.AtrPrice() > 0.0)
-                  ? g_symbol.AtrPrice() : AvgRangePrice();
-   double sl_mult = (g_symbol.Ready()) ? g_symbol.SlMult() : 1.60;
-   double tp_mult = (g_symbol.Ready()) ? g_symbol.TpMult() : 3.50;
-   g_lots = 0.10;
-
-   if(g_state == 1) // HOLD
+   string s = _Symbol;
+   ulong  h = 2166136261;
+   int    len = StringLen(s);
+   for(int i = 0; i < len; i++)
      {
-      g_confidence = 54;
-      g_entry = g_sl = g_tp = 0.0;
+      h ^= (ulong)StringGetCharacter(s, i);
+      h *= 16777619;
+     }
+   int tfc = 5;
+   if(Period() == PERIOD_M15)      tfc = 15;
+   else if(Period() == PERIOD_M30) tfc = 30;
+   return 700000 + (h % 9000) * 100 + (ulong)tfc;
+  }
+
+//+------------------------------------------------------------------+
+//| open the trade the judge asked for                                |
+//+------------------------------------------------------------------+
+void TryOpenTrade(void)
+  {
+   int dir = (g_dir.Dir() == AT_SIG_BUY) ? 1 : -1;
+   int eta = g_dir.ExpectedMinutes() * 60;
+
+   bool ok = g_trade.Open(dir, g_dir.UseLimit(), g_dir.Entry(), g_dir.Sl(),
+                          g_dir.Tp1(), g_dir.Tp2(), g_dir.Tp3(),
+                          eta, g_symbol.RiskPct(), g_dir.LaneAtr());
+   if(ok)
+     {
+      g_dir.MarkTraded();
+      g_trade.SetExpectedDefault(eta);
+      g_had_trade = true;
+      g_stats.Log("OPEN", g_dir.Audit());
+     }
+   else
+     {
+      g_last_fail = TimeCurrent();
+      g_stats.Log("ORDER FAILED", g_trade.LastError());
+      Print("Autotrader: could not open the trade - ", g_trade.LastError());
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| run the brains (throttled): profile -> direction -> safety        |
+//+------------------------------------------------------------------+
+void RunBrains(const bool force)
+  {
+   datetime now = TimeCurrent();
+   if(!force && g_last_brains > 0 && now - g_last_brains < 1)
       return;
+   g_last_brains = now;
+
+   //--- Phase 2: keep the symbol profile current (5s is plenty)
+   if(force || g_last_profile == 0 || now - g_last_profile >= 5)
+     {
+      g_symbol.Refresh(_Symbol, (ENUM_TIMEFRAMES)Period());
+      g_last_profile = now;
      }
 
-   if(g_state == 0) // BUY
+   //--- Phase 3: the judge
+   long spread_pts = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   g_dir.Refresh(g_symbol, force, spread_pts,
+                 g_symbol.SpreadLimitPts(), QuoteAgeSec());
+
+   //--- Phase 6: scoreboard, then Phase 5: safety (it needs today's result)
+   g_stats.Scan(false);
+   g_safety.SetDayRealized(g_stats.NetToday());
+   g_safety.Refresh(g_symbol, QuoteAgeSec());
+
+   //--- a NEW latched signal? count it, log it, and act on it
+   int      dir  = g_dir.Dir();
+   datetime ltch = g_dir.LatchTime();
+   if(dir != AT_SIG_HOLD && ltch != 0 && ltch != g_last_latch)
      {
-      g_confidence = 91;
-      g_entry = bid - 0.80 * range;
-      g_sl    = g_entry - sl_mult * range;
-      g_tp    = g_entry + tp_mult * range;
+      g_last_latch = ltch;
+      g_stats.OnSignal(dir, g_dir.Score(), g_dir.Threshold(),
+                       g_dir.RegimeDisplay(), g_dir.Audit());
+      Print("Autotrader: NEW SIGNAL - ", g_dir.Audit());
      }
-   else               // SELL
+   else if(dir == AT_SIG_HOLD && g_last_latch != 0)
      {
-      g_confidence = 84;
-      g_entry = bid + 0.80 * range;
-      g_sl    = g_entry + sl_mult * range;
-      g_tp    = g_entry - tp_mult * range;
+      //--- the signal was released: pull any waiting entry order back
+      g_last_latch = 0;
+      if(g_trade.HasPending())
+        {
+         g_trade.CancelPending();
+         g_stats.Log("CANCEL", "signal released - pending entry cancelled");
+        }
      }
+
+   //--- Phase 6: auto-execution (only when everything agrees)
+   if(InpAutoTrading && dir != AT_SIG_HOLD && g_dir.Tradable() &&
+      !g_dir.LatchTraded() && !g_trade.HasAny() && g_safety.CanOpen())
+     {
+      if(g_last_fail == 0 || now - g_last_fail >= 30)
+         TryOpenTrade();
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| notice a trade finishing: the latch is free again                 |
+//+------------------------------------------------------------------+
+void CheckTradeFinished(void)
+  {
+   bool has = g_trade.HasAny();
+   if(g_had_trade && !has)
+     {
+      g_had_trade = false;
+      g_dir.ClearLatch();
+      g_last_latch = 0;
+      g_stats.Scan(true);
+      g_stats.Log("CLOSED", "trade finished - scoreboard updated");
+     }
+   else if(has)
+      g_had_trade = true;
+  }
+
+//+------------------------------------------------------------------+
+//| gap shock check, once per new lane bar                            |
+//+------------------------------------------------------------------+
+void CheckGapOnNewBar(void)
+  {
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)Period();
+   double open0  = iOpen(_Symbol, tf, 0);
+   double close1 = iClose(_Symbol, tf, 1);
+   double atr    = (g_dir.LaneAtr() > 0.0) ? g_dir.LaneAtr() : g_symbol.AtrPrice();
+   g_safety.CheckGap(open0, close1, atr);
+  }
+
+//+------------------------------------------------------------------+
+//| one audit line per closed lane bar - this is how the judge is     |
+//| watched without trading (Experts log)                             |
+//+------------------------------------------------------------------+
+void AuditOnNewBar(void)
+  {
+   datetime bt = g_dir.LaneBarTime();
+   if(bt == 0 || bt == g_last_audit_bar)
+      return;
+   g_last_audit_bar = bt;
+   Print("Autotrader: ", g_dir.Audit(),
+         " | safety: ", (g_safety.CanOpen() ? "ok" : g_safety.Block()),
+         " | regime M30: ", g_dir.a30.regime.Display(),
+         " | M15: ", g_dir.a15.regime.Display(),
+         " | M5: ", g_dir.a5.regime.Display());
+  }
+
+//+------------------------------------------------------------------+
+//| STATUS row - plain words, and always the real reason              |
+//+------------------------------------------------------------------+
+string StatusText(color &clr)
+  {
+   clr = CLR_ORANGE;
+
+   if(!g_symbol.Ready() || !g_dir.Ready())
+      return "STATUS: Calibrating - studying this symbol, collecting price history";
+
+   if(g_trade.HasPosition())
+      return "STATUS: Trading - position open, managing the ladder";
+
+   if(g_trade.HasPending())
+      return "STATUS: Waiting - entry order placed at the zone edge";
+
+   if(!InpAutoTrading)
+     {
+      if(g_dir.Dir() == AT_SIG_HOLD)
+         return "STATUS: Auto Trading OFF - watching, HOLD (" + g_dir.Reason() + ")";
+      return "STATUS: Auto Trading OFF - signal displayed only, no orders sent";
+     }
+
+   if(!g_safety.CanOpen())
+     {
+      clr = g_safety.Alert() ? CLR_RED : CLR_ORANGE;
+      return "STATUS: Frozen - " + g_safety.Block();
+     }
+
+   if(g_dir.Dir() == AT_SIG_HOLD)
+      return "STATUS: Watching - HOLD (" + g_dir.Reason() + ")";
+
+   if(!g_dir.LatchTraded() && g_last_fail > 0 &&
+      TimeCurrent() - g_last_fail < 300)
+     {
+      clr = CLR_RED;
+      return "STATUS: Order rejected - " + g_trade.LastError();
+     }
+
+   return "STATUS: Signal armed - " + g_dir.Reason();
   }
 
 //+------------------------------------------------------------------+
@@ -201,17 +381,16 @@ void UpdateMainPanel(void)
    string dashes = "----------";
 
    //--- title row (row 0)
-   string auto = (InpAutoTrading &&
-                  (bool)MQLInfoInteger(MQL_TRADE_ALLOWED) &&
-                  (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) ? "ON" : "OFF";
+   string auto_txt = (InpAutoTrading &&
+                      (bool)MQLInfoInteger(MQL_TRADE_ALLOWED) &&
+                      (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) ? "ON" : "OFF";
    g_main.SetTitle("Autotrader V1.0 | " + _Symbol + " | TF: " + TFName() +
-                   " | Auto Trading: " + auto);
+                   " | Auto Trading: " + auto_txt);
 
    if(!g_compatible_tf)
      {
-      //--- owner rule: labels only, no data, status names the problem.
-      //--- Colour rule: only SIGNAL and STATUS may be coloured - every
-      //--- other row uses the one soft CLR_TEXT, here and everywhere.
+      //--- owner rule: labels only, no data, and STATUS names the problem.
+      //--- Colour rule: only SIGNAL and STATUS may be coloured.
       g_main.SetRow(1,  "Bid: " + dashes + " | Ask: " + dashes + " | Spread: " + dashes, CLR_TEXT);
       g_main.SetRow(2,  "Regime: " + dashes, CLR_TEXT);
       g_main.SetRow(3,  "SIGNAL: " + dashes, CLR_DIM);
@@ -231,26 +410,30 @@ void UpdateMainPanel(void)
    //--- live quotes row
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   long   spread = (long)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   long   spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    g_main.SetRow(1, "Bid: " + FmtPrice(bid) + " | Ask: " + FmtPrice(ask) +
                     " | Spread: " + IntegerToString(spread) + " pts", CLR_TEXT);
 
-   //--- regime: REAL since Phase 2 (expanded, specific labels agreed
-   //--- with the owner - direction + strength, or where price sits in
-   //--- the range). Plain soft text: only SIGNAL/STATUS are coloured.
-   g_main.SetRow(2, "Regime: " + g_regime.Display(), CLR_TEXT);
+   //--- regime: real and specific (Phase 2), for THIS chart's lane
+   g_main.SetRow(2, "Regime: " + g_dir.RegimeDisplay(), CLR_TEXT);
 
-   //--- signal + confidence
+   //--- signal + confidence: REAL since Phase 3
+   int    dir = g_dir.Dir();
    string sig_txt;
    color  sig_clr;
-   if(g_state == 0)      { sig_txt = "SIGNAL: " + GLYPH_UP + " BUY";   sig_clr = CLR_GREEN; }
-   else if(g_state == 2) { sig_txt = "SIGNAL: " + GLYPH_DOWN + " SELL"; sig_clr = CLR_RED;   }
-   else                  { sig_txt = "SIGNAL: " + GLYPH_DASH + " HOLD"; sig_clr = CLR_DIM;   }
+   if(dir == AT_SIG_BUY)       { sig_txt = "SIGNAL: " + GLYPH_UP + " BUY";    sig_clr = CLR_GREEN; }
+   else if(dir == AT_SIG_SELL) { sig_txt = "SIGNAL: " + GLYPH_DOWN + " SELL"; sig_clr = CLR_RED;   }
+   else                        { sig_txt = "SIGNAL: " + GLYPH_DASH + " HOLD"; sig_clr = CLR_DIM;   }
    g_main.SetRow(3, sig_txt, sig_clr);
-   g_main.SetRow(4, "Confidence: " + IntegerToString(g_confidence) + "% " +
-                    GLYPH_DASH + " " + ConfLabel(g_confidence), CLR_TEXT);
 
-   if(g_state == 1) // HOLD: no price plan rows
+   int conf = g_dir.Score();
+   g_main.SetRow(4, "Confidence: " + IntegerToString(conf) + "% " + GLYPH_DASH +
+                    " " + ConfLabel(conf), CLR_TEXT);
+
+   //--- the price plan: only printed when the levels are real
+   bool have_plan = (dir != AT_SIG_HOLD && g_dir.Entry() > 0.0 &&
+                     g_dir.Sl() > 0.0 && g_dir.Tp3() > 0.0);
+   if(!have_plan)
      {
       g_main.SetRow(5, "Entry: " + GLYPH_DASH, CLR_TEXT);
       g_main.SetRow(6, "Stop Loss: " + GLYPH_DASH, CLR_TEXT);
@@ -259,118 +442,147 @@ void UpdateMainPanel(void)
      }
    else
      {
-      double gap    = g_entry - bid;
-      double gap_usd = EstUsd(gap, g_lots);
-      g_main.SetRow(5, "Entry: " + FmtPrice(g_entry) + " / gap est. " + FmtUsd(gap_usd) +
-                       " (" + FmtPts(gap) + " away)", CLR_TEXT);
+      double lots = DisplayLots();
+      double entry = g_dir.Entry();
+      double sl    = g_dir.Sl();
+      double tp3   = g_dir.Tp3();
 
-      double sl_diff = g_sl - g_entry;
-      g_main.SetRow(6, "Stop Loss: " + FmtPrice(g_sl) + " / est. " +
-                       FmtUsd(EstUsd(sl_diff, g_lots)) + " (" + FmtPts(sl_diff) + ")", CLR_TEXT);
+      double gap     = entry - bid;
+      double gap_usd = EstUsd(gap, lots);
+      g_main.SetRow(5, "Entry: " + FmtPrice(entry) + " / gap est. " +
+                       FmtUsd(gap_usd) + " (" + FmtPts(gap) + " away)", CLR_TEXT);
 
-      double tp_diff = g_tp - g_entry;
-      g_main.SetRow(7, "Take Profit: " + FmtPrice(g_tp) + " / est. " +
-                       FmtUsd(EstUsd(tp_diff, g_lots)) + " (" + FmtPts(tp_diff) + ")", CLR_TEXT);
+      double sl_diff = sl - entry;
+      g_main.SetRow(6, "Stop Loss: " + FmtPrice(sl) + " / est. " +
+                       FmtUsd(EstUsd(sl_diff, lots)) + " (" + FmtPts(sl_diff) + ")", CLR_TEXT);
 
-      double rr = MathAbs(tp_diff) / MathMax(MathAbs(sl_diff), _Point);
-      g_main.SetRow(8, "Risk:Reward 1:" + DoubleToString(rr, 1), CLR_TEXT);
+      double tp_diff = tp3 - entry;
+      g_main.SetRow(7, "Take Profit: " + FmtPrice(tp3) + " / est. " +
+                       FmtUsd(EstUsd(tp_diff, lots)) + " (" + FmtPts(tp_diff) + ")", CLR_TEXT);
+
+      g_main.SetRow(8, "Risk:Reward 1:" + DoubleToString(g_dir.Rr(), 1), CLR_TEXT);
      }
 
-   //--- session (info only - never blocks)
-   g_main.SetRow(9, "Session: " + SessionName() + " | Expected Duration: " +
-                    ExpectedDuration(), CLR_TEXT);
+   //--- session (information only) + the real expected duration
+   string dur = have_plan ? DurationText(g_dir.ExpectedMinutes()) : "~-";
+   g_main.SetRow(9, "Session: " + SessionName() + " | Expected Duration: " + dur, CLR_TEXT);
 
-   //--- status (coloured row): Phase 2 state in plain words
-   if(!g_symbol.Ready() || !g_regime.Ready())
-      g_main.SetRow(10, "STATUS: Calibrating - studying this symbol, collecting price history", CLR_ORANGE);
-   else
-      g_main.SetRow(10, "STATUS: Phase 2 live - " + g_symbol.ClassLabel() +
-                        " profile ready, regime live; signals still preview (Phase 3)", CLR_ORANGE);
+   //--- status: the honest reason, in plain words
+   color st_clr = CLR_ORANGE;
+   g_main.SetRow(10, StatusText(st_clr), st_clr);
 
    //--- counters (owner rule: Win = closed positive, Loss = closed negative, BE = zero)
-   g_main.SetRow(11, "Today: Num of Signal: 0, Win: 0, Loss: 0, BE: 0", CLR_TEXT);
-   g_main.SetRow(12, "All Time: Num of Signal: 0, Win: 0, Loss: 0, BE: 0", CLR_TEXT);
+   g_main.SetRow(11, g_stats.TodayText(), CLR_TEXT);
+   g_main.SetRow(12, g_stats.AllTimeText(), CLR_TEXT);
 
    g_main.Layout();
   }
 
 //+------------------------------------------------------------------+
-//| update LIVE TRADING panel rows (visible only while "order" open)   |
+//| LIVE TRADING panel - real orders only, since Phase 4              |
 //+------------------------------------------------------------------+
 void UpdateLivePanel(void)
   {
-   //--- visible only in preview trade states (BUY / SELL)
-   bool visible = (g_compatible_tf && g_state != 1);
-   g_live.SetVisible(visible);
+   bool visible = (g_compatible_tf && g_trade.HasAny());
+   if(visible != g_live_shown)
+     {
+      g_live.SetVisible(visible);   // only when it really changes
+      g_live_shown = visible;
+     }
    if(!visible)
       return;
 
+   int i = g_trade.MainIdx();
+   if(i < 0)
+      return;
+
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   int    t     = (int)(TimeCurrent() - g_state_started);   // seconds in state
-   double tp1   = g_entry + 0.60 * (g_tp - g_entry);
-   double tp2   = g_entry + 0.80 * (g_tp - g_entry);
-   double tp3   = g_tp;
-   string dir   = (g_state == 0) ? "BUY" : "SELL";
+   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double mark  = (g_trade.st[i].dir == 1) ? bid : ask;
+   string dir_s = (g_trade.st[i].dir == 1) ? "BUY" : "SELL";
+   double lots  = g_trade.st[i].v_now;
 
    g_live.SetTitle("LIVE TRADING");
-   g_live.SetRow(1, "Order #100001 (sample) | " + dir + " " + DoubleToString(g_lots, 2) +
-                    " lot | opened " + HmOf(g_state_started), CLR_TEXT);
 
-   double fl = EstUsd(bid - g_entry, g_lots);
-   if(g_state == 2)
-      fl = EstUsd(g_entry - bid, g_lots);
-   g_live.SetRow(2, "Entry: " + FmtPrice(g_entry) + " " + ShortToString(0x2192) + " Now: " +
-                    FmtPrice(bid) + "  (floating " + FmtUsd(fl) + ")", CLR_TEXT);
+   //--- row 1: the order itself
+   if(g_trade.st[i].is_pending)
+      g_live.SetRow(1, "Order #" + IntegerToString((long)g_trade.st[i].ticket) + " | " +
+                       dir_s + " LIMIT " + DoubleToString(lots, 2) +
+                       " lot | placed " + HmOf(g_trade.st[i].opened), CLR_TEXT);
+   else
+      g_live.SetRow(1, "Order #" + IntegerToString((long)g_trade.st[i].ticket) + " | " +
+                       dir_s + " " + DoubleToString(lots, 2) +
+                       " lot | opened " + HmOf(g_trade.st[i].opened), CLR_TEXT);
 
-   //--- Stop Loss row (owner asked for it) - shows the SL journey.
-   //--- Plain soft text: only SIGNAL/STATUS rows carry colour.
-   if(t < 6)
+   //--- row 2: entry -> now, with the floating result
+   if(g_trade.st[i].is_pending)
      {
-      g_live.SetRow(3, "Stop Loss : " + FmtPrice(g_sl) + "  (initial)", CLR_TEXT);
-      g_live.SetRow(4, "Break-Even: not armed", CLR_TEXT);
+      double dist = mark - g_trade.st[i].entry;
+      g_live.SetRow(2, "Entry: " + FmtPrice(g_trade.st[i].entry) + " (limit) " +
+                       GLYPH_ARROW + " Now: " + FmtPrice(mark) + "  (" +
+                       FmtPts(dist) + " away)", CLR_TEXT);
      }
    else
-     {
-      g_live.SetRow(3, "Stop Loss : " + FmtPrice(g_entry) +
-                       "  (started " + FmtPrice(g_sl) + " " + ShortToString(0x2192) +
-                       " moved to Entry)", CLR_TEXT);
-      string be = "LOCKED";
-      if(t < 8)
-         be = "ARMED";
-      g_live.SetRow(4, "Break-Even: " + be, CLR_TEXT);
-     }
+      g_live.SetRow(2, "Entry: " + FmtPrice(g_trade.st[i].entry) + " " + GLYPH_ARROW +
+                       " Now: " + FmtPrice(mark) + "  (floating " +
+                       FmtUsd(g_trade.FloatingUsd(i)) + ")", CLR_TEXT);
+
+   //--- rows 3-5: the protective stop, break-even, trailing
+   g_live.SetRow(3, "Stop Loss : " + g_trade.SlJourneyText(i), CLR_TEXT);
+   g_live.SetRow(4, "Break-Even: " + g_trade.BeStateText(i), CLR_TEXT);
    g_live.SetRow(5, "Trail Stop: OFF (later phase)", CLR_TEXT);
 
-   //--- TP ladder rows (owner's 60 / 80 / 100 idea)
-   double prog = 0.0;
-   double full = MathMax(MathAbs(tp1 - g_entry), _Point);
-   prog = MathAbs(bid - g_entry) / full * 100.0;
-   prog = MathMax(0.0, MathMin(99.0, prog));
-
-   if(t < 12)
-      g_live.SetRow(6, "TP1 " + FmtPrice(tp1) + " (60%) : pending - " +
-                       DoubleToString(prog, 0) + "% progress to target", CLR_TEXT);
+   //--- rows 6-8: the owner's 60 / 80 / 100 ladder
+   string tp1s, tp2s, tp3s;
+   if(g_trade.st[i].is_pending)
+     {
+      tp1s = "pending - waiting for the entry";
+      tp2s = "pending";
+      tp3s = "pending";
+     }
    else
-      g_live.SetRow(6, "TP1 " + FmtPrice(tp1) + " (60%) : " + GLYPH_CHECK +
-                       " HIT - closed 50% of lot", CLR_TEXT);
+     {
+      double prog = g_trade.TpProgress(i);
+      if(g_trade.st[i].tp1_hit)
+         tp1s = GLYPH_CHECK + " HIT " + HmOf(g_trade.st[i].tp1_time) +
+                " - closed 50% of lot";
+      else
+         tp1s = "pending - " + DoubleToString(prog, 0) + "% progress to target";
 
-   if(t < 16)
-      g_live.SetRow(7, "TP2 " + FmtPrice(tp2) + " (80%) : pending", CLR_TEXT);
-   else
-      g_live.SetRow(7, "TP2 " + FmtPrice(tp2) + " (80%) : " + GLYPH_CHECK +
-                       " HIT - closed 30% of lot", CLR_TEXT);
+      if(g_trade.st[i].tp2_hit)
+         tp2s = GLYPH_CHECK + " HIT - closed 30% of lot";
+      else if(g_trade.st[i].tp1_hit)
+        {
+         double full2 = MathAbs(g_trade.st[i].tp2 - g_trade.st[i].entry);
+         double p2 = (full2 > 0.0)
+                     ? MathMin(99.0, MathAbs(mark - g_trade.st[i].entry) / full2 * 100.0)
+                     : 0.0;
+         tp2s = "pending - " + DoubleToString(p2, 0) + "% progress to target";
+        }
+      else
+         tp2s = "pending";
 
-   if(t < 19)
-      g_live.SetRow(8, "TP3 " + FmtPrice(tp3) + " (100%): pending", CLR_TEXT);
-   else
-      g_live.SetRow(8, "TP3 " + FmtPrice(tp3) + " (100%): " + GLYPH_CHECK +
-                       " HIT - closed 20% of lot", CLR_TEXT);
+      if(g_trade.st[i].tp3_hit)
+         tp3s = GLYPH_CHECK + " HIT - closed 20% of lot";
+      else
+         tp3s = "pending";
+     }
+   g_live.SetRow(6, "TP1 " + FmtLevel(g_trade.st[i].tp1) + " (60%) : " + tp1s, CLR_TEXT);
+   g_live.SetRow(7, "TP2 " + FmtLevel(g_trade.st[i].tp2) + " (80%) : " + tp2s, CLR_TEXT);
+   g_live.SetRow(8, "TP3 " + FmtLevel(g_trade.st[i].tp3) + " (100%): " + tp3s, CLR_TEXT);
 
+   //--- row 9: what the manager is doing right now
    string st;
-   if(t < 6)       st = "STATUS: Managing - running to TP1";
-   else if(t < 12) st = "STATUS: Managing - running to TP2";
-   else if(t < 16) st = "STATUS: Managing - running to TP3";
-   else            st = "STATUS: Managing - ladder complete";
+   if(g_trade.st[i].is_pending)
+      st = "STATUS: Waiting - entry at " + FmtPrice(g_trade.st[i].entry);
+   else if(!g_trade.st[i].tp1_hit)
+      st = "STATUS: Managing - running to TP1";
+   else if(!g_trade.st[i].tp2_hit)
+      st = "STATUS: Managing - break-even locked, running to TP2";
+   else if(!g_trade.st[i].tp3_hit)
+      st = "STATUS: Managing - running to TP3";
+   else
+      st = "STATUS: Managing - ladder complete";
    g_live.SetRow(9, st, CLR_ORANGE);   // STATUS row: coloured by design
 
    g_live.Layout();
@@ -381,7 +593,7 @@ void UpdateLivePanel(void)
 //+------------------------------------------------------------------+
 void DockLivePanel(void)
   {
-   if(g_compatible_tf && g_state != 1)
+   if(g_compatible_tf && g_trade.HasAny())
       g_live.Move(g_main.X(), g_main.Y() + g_main.Height() + g_live_gap);
   }
 
@@ -433,16 +645,61 @@ int OnInit()
       Print("Autotrader: failed to create LIVE panel");
       return INIT_FAILED;
      }
+   g_live.SetVisible(false);
 
-   //--- enable mouse-move events for dragging
+   //--- drag support
    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
 
-   g_state_started = TimeCurrent();
-   RefreshEngines(true);   // Phase 2: profile this symbol + first regime read
-   BuildSampleSignal();
+   if(!g_compatible_tf)
+     {
+      UpdateUI();
+      EventSetTimer(1);
+      Print("Autotrader: incompatible chart timeframe - attach to M5, M15 or M30");
+      return INIT_SUCCEEDED;
+     }
+
+   //--- Phase 2: study this symbol first (the dials feed everything else)
+   g_symbol.Refresh(_Symbol, tf);
+   g_last_profile = TimeCurrent();
+
+   //--- Phase 3: the judge, on all three timeframes at once
+   g_dir.Setup(_Symbol, tf);
+
+   //--- Phase 4/6: the trade manager (magic derived, never an input)
+   g_magic = DeriveMagic();
+   g_trade.Init(_Symbol, g_magic, 20, g_symbol);
+
+   //--- Phase 5: safety, Phase 6: scoreboard
+   g_safety.Init();
+   g_stats.Init(_Symbol, g_magic, TFName());
+
+   //--- first full pass, then the heartbeat
+   RunBrains(true);
+   g_trade.Manage();
    UpdateUI();
 
-   EventSetTimer(1);   // 1-second UI heartbeat
+   //--- honest warning until Phase 7 has proven the numbers
+   long acct_mode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   if(acct_mode != ACCOUNT_TRADE_MODE_DEMO)
+      Print("Autotrader: WARNING - this is NOT a demo account. Phase 7 ",
+            "validation (Strategy Tester + walk-forward + demo forward) is ",
+            "not finished yet, so the confidence threshold is still unproven. ",
+            "Consider running this on demo first.");
+
+   Print("Autotrader V1.0 ready | ", _Symbol, " ", TFName(),
+         " | lane ", g_dir.LaneName(),
+         " | magic ", IntegerToString((long)g_magic),
+         " | ", g_symbol.ClassLabel(), " profile, threshold ",
+         IntegerToString(g_dir.Threshold()), "%",
+         " | auto trading ", (InpAutoTrading ? "ON" : "OFF"),
+         " | account ", (acct_mode == ACCOUNT_TRADE_MODE_DEMO ? "demo" : "LIVE"));
+   g_stats.Log("INIT", StringFormat("lane %s magic %d threshold %d account %s auto %s",
+                                     g_dir.LaneName(), (int)g_magic,
+                                     g_dir.Threshold(),
+                                     (acct_mode == ACCOUNT_TRADE_MODE_DEMO ? "demo" : "live"),
+                                     (InpAutoTrading ? "on" : "off")));
+
+   EventSetTimer(1);   // 1-second heartbeat
    return INIT_SUCCEEDED;
   }
 
@@ -452,6 +709,8 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   if(g_compatible_tf)
+      g_stats.Log("DEINIT", "EA removed/reinitialised, reason " + IntegerToString(reason));
    g_main.Destroy();
    g_live.Destroy();
    ChartSetInteger(0, CHART_MOUSE_SCROLL, true);   // restore chart scroll
@@ -459,30 +718,66 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
-//| tick: keep quotes fresh                                           |
+//| tick: manage open trades, keep the panel honest                   |
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   if(g_compatible_tf)
+     {
+      RunBrains(false);
+      g_trade.Manage();          // ladder + break-even need every tick
+      CheckTradeFinished();
+     }
    UpdateUI();
   }
 
 //+------------------------------------------------------------------+
-//| timer: preview state cycle + UI heartbeat                         |
+//| timer: heartbeat, new-bar work, scoreboard                        |
 //+------------------------------------------------------------------+
 void OnTimer()
   {
-   g_timer_ticks++;
-   RefreshEngines(false);   // Phase 2: keep profile + regime current (5s)
-   //--- cycle sample states every 20s so the owner can see
-   //    BUY -> HOLD -> SELL -> ... on the panel (preview only, Phase 3
-   //    replaces these samples with the real direction engine)
-   if(g_timer_ticks % 20 == 0)
+   if(g_compatible_tf)
      {
-      g_state = (g_state + 1) % 3;
-      g_state_started = TimeCurrent();
-      BuildSampleSignal();
+      RunBrains(false);
+      g_trade.Manage();
+      CheckTradeFinished();
+
+      //--- once per closed lane bar: gap shock check + the audit line
+      datetime lane_bar = g_dir.LaneBarTime();
+      if(lane_bar != 0 && lane_bar != g_last_gap_bar)
+        {
+         g_last_gap_bar = lane_bar;
+         CheckGapOnNewBar();     // Phase 5
+         AuditOnNewBar();        // Phase 3
+        }
+      g_stats.Scan(false);       // Phase 6: scoreboard (throttled inside)
+      g_safety.SetDayRealized(g_stats.NetToday());
      }
    UpdateUI();
+  }
+
+//+------------------------------------------------------------------+
+//| trade events: keep the scoreboard and the states in step          |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+  {
+   if(!g_compatible_tf)
+      return;
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD ||
+      trans.type == TRADE_TRANSACTION_POSITION ||
+      trans.type == TRADE_TRANSACTION_ORDER_ADD ||
+      trans.type == TRADE_TRANSACTION_ORDER_UPDATE ||
+      trans.type == TRADE_TRANSACTION_ORDER_DELETE ||
+      trans.type == TRADE_TRANSACTION_HISTORY_ADD)
+     {
+      g_trade.Sync();
+      g_stats.Scan(true);
+      g_safety.SetDayRealized(g_stats.NetToday());
+      CheckTradeFinished();
+      UpdateUI();
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -490,16 +785,15 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
-   //--- MAIN header drag: move whole unit
+   //--- MAIN header drag: move the whole unit
    if(g_main.HandleEvent(id, lparam, dparam, sparam))
      {
       DockLivePanel();
       return;
      }
 
-   //--- LIVE header drag: move whole unit too (compute delta).
-   //    Only when the LIVE panel is actually visible (it is hidden during HOLD).
-   bool live_visible = (g_compatible_tf && g_state != 1);
+   //--- LIVE header drag: move the whole unit too (compute the delta)
+   bool live_visible = (g_compatible_tf && g_trade.HasAny());
    int lx = g_live.X();
    int ly = g_live.Y();
    if(live_visible && g_live.HandleEvent(id, lparam, dparam, sparam))
@@ -513,8 +807,10 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
    if(id == CHARTEVENT_CHART_CHANGE)
      {
-      RefreshEngines(true);   // new TF/symbol context: re-study at once
-      BuildSampleSignal();
+      //--- the chart was resized or its context changed: re-study now
+      g_symbol.Refresh(_Symbol, (ENUM_TIMEFRAMES)Period());
+      g_last_profile = TimeCurrent();
+      RunBrains(true);
       UpdateUI();
      }
   }

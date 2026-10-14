@@ -1,0 +1,9 @@
+# MetaEditor build output (the owner compiles locally; sources are what we keep)
+*.ex5
+*.ex5.tmp
+*.mq5.bak
+*.mqh.bak
+
+# development-side Python checkers in tools/ (never part of the EA)
+__pycache__/
+*.pyc
