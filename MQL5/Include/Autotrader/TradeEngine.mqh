@@ -658,11 +658,17 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
 
    Sync();
    int idx = MainIdx();
+   //--- read the ticket behind a plain if, never inside a ?: - st[] is a
+   //--- fixed-size array and a range guard written inside a ?: does not bound
+   //--- the read (see VolumeFlow.mqh, 14 Oct 2026). idx is -1 whenever the
+   //--- broker has not reported the new position yet, which is a normal state.
+   string tkt = "";
+   if(idx >= 0)
+      tkt = " ticket " + IntegerToString((long)st[idx].ticket);
    Print("Autotrader: ", (dir == 1 ? "BUY" : "SELL"), " ", DoubleToString(lots, 2),
          " lot opened at ", DoubleToString(e, m_digits),
          " SL ", DoubleToString(s, m_digits),
-         " TP3 ", DoubleToString(t3, m_digits),
-         (idx >= 0 ? " ticket " + IntegerToString((long)st[idx].ticket) : ""));
+         " TP3 ", DoubleToString(t3, m_digits), tkt);
    return true;
   }
 

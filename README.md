@@ -134,7 +134,7 @@ Success % = Win ÷ (Win + Loss) — that is the number Phase 7 must push to ~98.
 
 ## Development checks (not part of the EA)
 
-This workspace has no MetaEditor, so two small Python checkers were used while
+This workspace has no MetaEditor, so three small Python checkers were used while
 writing the MQL5; they live in `tools/` and are never copied into MT5:
 
 - `python3 tools/mql5_lint.py` — brackets, include guards, duplicate
@@ -151,3 +151,12 @@ writing the MQL5; they live in `tools/` and are never copied into MT5:
   designed, that risk sizing never overshoots the dial, that the 50/30/20 ladder
   always closes exactly the opening volume after volume-step rounding, and that
   the owner's Win/Loss/BE rule reproduces PLAN §1's four worked cases.
+- `python3 tools/volume_profile_sim.py` — re-states the session volume-profile
+  walk of `VolumeFlow.mqh` (from the POC, grow outward until 70% of the volume
+  is inside) and runs it over 20,000 synthetic sessions plus the spike shapes
+  that used to kill it. Added after the 14 Oct 2026 runtime report
+  `Autotrader (EURUSDm,M15) array out of range in 'VolumeFlow.mqh' (200,38)`,
+  which only some symbols produced: it reproduces the old `dn++` walk that left
+  the bin array (13% of ordinary sessions, 40% of spike-shaped ones) and asserts
+  that the patched walk never forms an out-of-range index, never counts a bin
+  twice, always keeps VAL <= POC <= VAH and always reaches 70% of the volume.

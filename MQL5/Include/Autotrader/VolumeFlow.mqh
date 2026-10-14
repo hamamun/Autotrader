@@ -192,14 +192,31 @@ bool CVolumeFlow::Analyse(const MqlRates &r[], const int window,
       out.poc = lo + ((double)poc_bin + 0.5) * step;
 
       //--- value area: grow out of the POC until 70% of the volume
+      //--- up walks up the bins, dn walks DOWN them. Two rules here, both
+      //--- learned the hard way (14 Oct 2026, "array out of range in
+      //--- 'VolumeFlow.mqh' (200,38)" on some symbols):
+      //---   * dn-- not dn++ : incrementing it walked back up over the bins
+      //---     already counted. When the top of the session range held no
+      //---     volume the up side ran out first, so every later step took
+      //---     the dn branch and dn climbed to 24 - past the end of the
+      //---     array. Which symbols hit it depended only on their session
+      //---     profile, hence "some symbols are fine".
+      //---   * the same reads used a `?:` to stay in range -
+      //---     `(dn >= 0) ? bin[dn] : -1.0`. A guard written INSIDE a ?:
+      //---     is not a bound on the read: MQL5 may evaluate both operands
+      //---     of a ?: on a fixed-size array, so bin[-1] (which is what dn
+      //---     is on entry whenever the POC sits in the lowest bin) is
+      //---     reachable with or without the dn++ fault. Plain ifs leave no
+      //---     doubt about which side is evaluated.
       double acc = bin[poc_bin];
       int up = poc_bin + 1, dn = poc_bin - 1;
       while((up < ATVF_BINS || dn >= 0) && total > 0.0 && acc < total * 0.70)
         {
-         double bu = (up < ATVF_BINS) ? bin[up] : -1.0;
-         double bd = (dn >= 0) ? bin[dn] : -1.0;
+         double bu = -1.0, bd = -1.0;
+         if(up < ATVF_BINS) bu = bin[up];
+         if(dn >= 0)        bd = bin[dn];
          if(bu >= bd && up < ATVF_BINS) { acc += bu; up++; }
-         else if(dn >= 0)               { acc += bd; dn++; }
+         else if(dn >= 0)               { acc += bd; dn--; }
          else                            break;
         }
       out.vah = lo + (double)up * step;
