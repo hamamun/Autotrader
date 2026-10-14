@@ -320,8 +320,8 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
       long otype = OrderGetInteger(ORDER_TYPE);
       st[idx].dir    = (otype == ORDER_TYPE_BUY_LIMIT || otype == ORDER_TYPE_BUY_STOP) ? 1 : -1;
       st[idx].entry  = OrderGetDouble(ORDER_PRICE_OPEN);
-      st[idx].sl_now = OrderGetDouble(ORDER_PRICE_SL);
-      st[idx].tp3    = OrderGetDouble(ORDER_PRICE_TP);
+      st[idx].sl_now = OrderGetDouble(ORDER_SL);   // ENUM_ORDER_PROPERTY_DOUBLE: pending stop loss
+      st[idx].tp3    = OrderGetDouble(ORDER_TP);   // ENUM_ORDER_PROPERTY_DOUBLE: pending take profit
       st[idx].v_now  = OrderGetDouble(ORDER_VOLUME_CURRENT);
       st[idx].opened = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
      }
@@ -419,8 +419,8 @@ void CTradeEngine::UpdateStateFromBroker(const int idx)
       if(OrderSelect(st[idx].ticket))
         {
          st[idx].v_now = OrderGetDouble(ORDER_VOLUME_CURRENT);
-         st[idx].sl_now = OrderGetDouble(ORDER_PRICE_SL);
-         st[idx].tp3    = OrderGetDouble(ORDER_PRICE_TP);
+         st[idx].sl_now = OrderGetDouble(ORDER_SL);
+         st[idx].tp3    = OrderGetDouble(ORDER_TP);
         }
       return;
      }
@@ -642,7 +642,7 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
                                   trade.ResultRetcodeDescription());
       //--- requotes / price changed / off quotes: try again at once
       if(rc != TRADE_RETCODE_REQUOTE && rc != TRADE_RETCODE_PRICE_CHANGED &&
-         rc != TRADE_RETCODE_PRICE_OFF && rc != TRADE_RETCODE_TRADE_TIMEOUT &&
+         rc != TRADE_RETCODE_PRICE_OFF && rc != TRADE_RETCODE_TIMEOUT &&
          rc != TRADE_RETCODE_REJECT)
          break;
       if(!MQLInfoInteger(MQL_TESTER))
@@ -717,7 +717,7 @@ bool CTradeEngine::PartialClose(const int idx, const double fraction, const stri
       m_last_error = StringFormat("partial close failed: retcode %d (%s)", (int)rc,
                                   trade.ResultRetcodeDescription());
       if(rc != TRADE_RETCODE_REQUOTE && rc != TRADE_RETCODE_PRICE_CHANGED &&
-         rc != TRADE_RETCODE_PRICE_OFF && rc != TRADE_RETCODE_TRADE_TIMEOUT)
+         rc != TRADE_RETCODE_PRICE_OFF && rc != TRADE_RETCODE_TIMEOUT)
          break;
       if(!MQLInfoInteger(MQL_TESTER))
          Sleep(150);

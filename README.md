@@ -139,7 +139,12 @@ writing the MQL5; they live in `tools/` and are never copied into MT5:
 
 - `python3 tools/mql5_lint.py` — brackets, include guards, duplicate
   definitions, declared-vs-defined class methods, EA calls that do not exist,
-  and a blocklist of MQL5 functions that do not exist.
+  and a blocklist of MQL5 functions and constants that do not exist. Since the
+  14 Oct 2026 compile it also checks every ALL-CAPS name used (it must be one
+  of our `#define`s / enums / glyphs or a verified MQL5 constant), the property
+  argument handed to `OrderGetDouble` / `PositionGetDouble` / `HistoryDealGet*`
+  / `AccountInfo*`, and the `TRADE_RETCODE_*` family — the three mistakes that
+  compile reported.
 - `python3 tools/score_sim.py` — re-states the decision and money arithmetic and
   asserts the weights sum to 1.00, that random noise never clears the threshold
   (HOLD really is the default), that all 15 regime/direction gates behave as

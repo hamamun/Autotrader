@@ -11,6 +11,12 @@
 > Note: the code cannot be compiled inside this workspace (no MetaEditor), so
 > the first compile in MetaEditor (F7) is the owner's to run; `tools/` holds
 > two Python checkers used while writing it (see section 6B.4).
+> **14 Oct 2026 — first compile feedback (owner):** 17 errors, all from four
+> names — `ORDER_PRICE_SL` / `ORDER_PRICE_TP` (the pending-order stop and
+> target are `ORDER_SL` / `ORDER_TP`), `TRADE_RETCODE_TRADE_TIMEOUT` (it is
+> `TRADE_RETCODE_TIMEOUT`, 10012) and one missing glyph macro `GLYPH_ARROW`
+> (now `#define`d with the other glyphs in `Panel.mqh`). Fixed the same day,
+> and `tools/mql5_lint.py` grew the three checks that would have caught them.
 
 ---
 
@@ -530,7 +536,12 @@ plus everything the safety layer adds (section 4F).
 `tools/mql5_lint.py` — bracket balance, unique include guards, no duplicate
 global definitions, every declared class method defined (and every definition
 declared), every method the EA calls on its own objects really exists, and a
-blocklist of MQL5 calls that do not exist. `tools/score_sim.py` — re-states the
+blocklist of MQL5 calls that do not exist. After the owner's first MetaEditor
+compile on 14 Oct 2026 (17 errors, 4 wrong names) it also checks: every
+ALL-CAPS name used is either ours (`#define`, enum, glyph) or a verified MQL5
+constant, the property argument of each built-in accessor belongs to that
+accessor's own enum, and every `TRADE_RETCODE_*` used is a real trade server
+retcode. `tools/score_sim.py` — re-states the
 decision and money arithmetic and asserts: the four weight sets sum to 1.00,
 random noise never reaches the threshold (HOLD is the default state), all 15
 regime/direction gate combinations behave as designed, risk-sized lots never
