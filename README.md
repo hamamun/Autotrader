@@ -21,7 +21,9 @@ What works right now:
 
 - **MAIN panel** — exact look/rows of the reference: title, Bid/Ask/Spread,
   Regime, SIGNAL (BUY/SELL/HOLD with arrows + colors), Confidence % + label
-  (and the threshold it must beat), Entry / Stop Loss / Take Profit with USD
+  (and the threshold it must beat; while no side has been chosen yet the row
+  shows the provisional side's evidence, marked, instead of a bare 0%),
+  Entry / Stop Loss / Take Profit with USD
   estimates and points, Risk:Reward, Session | Expected Duration, STATUS,
   Today / All Time counters.
 - **Direction engine (Phase 3, live).** The SIGNAL row is real. The engine
@@ -128,6 +130,16 @@ M30 bias)`, `Watching — HOLD (score 78 below the 90 needed)`,
 at the zone edge`, `Trading — position open, managing the ladder`,
 `Frozen — news freeze — USD news`, `Stand-down — daily loss limit reached`.
 
+When the market gives no side at all (the lane's own witnesses are within ±2 of
+a tie) the CONFIDENCE row and the Experts-log line still show the scoring,
+marked: `Confidence: 54% — BUY-side evidence (no side yet, 92 needed)` and
+`score=0/92 vote=-1 PROV[BUY 54] parts[bias 40 …]`. Those numbers describe the
+side the engine would look at first — the candidate under evaluation, else a
+range extreme's fade side, else the vote's lean (and when the vote is a perfect
+tie, the graded lean of the same witnesses) — and are **evidence on screen,
+never a signal**: the SIGNAL stays HOLD, the published score stays 0 and nothing
+can latch on them.
+
 ## Roadmap (see PLAN.md for the full design)
 
 | Phase | Deliverable | Status |
@@ -162,8 +174,10 @@ writing the MQL5; they live in `tools/` and are never copied into MT5:
   asserts the weights sum to 1.00, that random noise never clears the threshold
   (HOLD really is the default), that all 15 regime/direction gates behave as
   designed, that risk sizing never overshoots the dial, that the 50/30/20 ladder
-  always closes exactly the opening volume after volume-step rounding, and that
-  the owner's Win/Loss/BE rule reproduces PLAN §1's four worked cases.
+  always closes exactly the opening volume after volume-step rounding, that the
+  owner's Win/Loss/BE rule reproduces PLAN §1's four worked cases, and that the
+  provisional parts shown while no side has been chosen (decision #20) describe
+  the right side yet can never become a signal.
 - `python3 tools/volume_profile_sim.py` — re-states the session volume-profile
   walk of `VolumeFlow.mqh` (from the POC, grow outward until 70% of the volume
   is inside) and runs it over 20,000 synthetic sessions plus the spike shapes
