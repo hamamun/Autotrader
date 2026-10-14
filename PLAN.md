@@ -102,6 +102,7 @@ Panel life-cycle of the SL (visible in LIVE TRADING panel):
 | 16 | **Full 2026 indicator stack locked (14 Oct 2026):** Nadaraya–Watson, Ehlers DSP family, Kalman, Smart-Money Concepts and volume-flow tools are all built as Phase 3 evidence — hand-written MQL5, no external library. |
 | 17 | **Still zero inputs (reaffirmed 14 Oct 2026):** Phases 3–6 added *no* user settings. Every new number (weights, thresholds, distances, lot size, news window, daily-loss limit, equity floor) is either measured from the market or derived from the symbol's own profile. `Auto Trading` ON/OFF remains the only control. |
 | 18 | **Demo until proven (14 Oct 2026):** because Phases 3–6 landed together, the EA runs on a demo account until Phase 7 (tester + walk-forward + demo forward) confirms the scoreboard. Real money only after that. |
+| 19 | **First runtime report fixed (14 Oct 2026):** attaching to some symbols printed `Autotrader (EURUSDm,M15) array out of range in 'VolumeFlow.mqh' (200,38)` — the session volume-profile walk. The low-side pointer incremented (`dn++`) instead of walking down, so whenever the top of the session range held no volume it climbed from bin to bin until it ran off the end of `double bin[24]`; which symbols died depended only on their session profile, which is why others ran normally. The same neighbour read also leaned on a range guard written *inside* a `?:`, which does not bound a fixed-size array read. Fixed: `dn--`, both neighbour reads and the order-log ticket read in `TradeEngine.mqh` moved behind plain `if`s, and `tools/volume_profile_sim.py` now reproduces the old fault and pins the new behaviour. |
 
 ---
 
@@ -548,7 +549,15 @@ regime/direction gate combinations behave as designed, risk-sized lots never
 exceed the dial by more than the small-account allowance, the 50/30/20 ladder
 always closes exactly the opening volume after volume-step rounding, and the
 owner's Win/Loss/BE rule reproduces the four cases in section 1.
-Both are development checks only — they are **not** part of the EA and are never
+`tools/volume_profile_sim.py` — re-states the session volume-profile walk of
+`VolumeFlow.mqh` (from the POC, grow outward until 70% of the volume) and runs
+it over 20,000 synthetic sessions plus the spike shapes that used to kill it.
+It exists because of the first runtime report (decision #19): it reproduces the
+old `dn++` walk leaving the bin array (13% of ordinary sessions, 40% of
+spike-shaped ones) and asserts the patched walk never forms an out-of-range
+index, never counts a bin twice, always keeps VAL ≤ POC ≤ VAH and always
+reaches 70% of the volume.
+All three are development checks only — they are **not** part of the EA and are never
 copied into MT5 (only the `MQL5/` folder is).
 
 ---
