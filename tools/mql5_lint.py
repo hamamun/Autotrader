@@ -27,7 +27,10 @@ FILES = [
     "MQL5/Include/Autotrader/SafetyManager.mqh",
     "MQL5/Include/Autotrader/StatsKeeper.mqh",
     "MQL5/Include/Autotrader/TradeEngine.mqh",
-    "MQL5/Experts/Autotrader/Autotrader.mq5",
+    "MQL5/Include/Autotrader/Validation.mqh",
+    "MQL5/Scripts/Autotrader/Phase7_Report.mq5",
+    "MQL5/Scripts/Autotrader/Phase7_Permutation.mq5",
+    "MQL5/Experts/Autotrader/Autotrader.mq5",   # keep the EA last (checks use FILES[-1])
 ]
 
 problems = []
@@ -107,6 +110,8 @@ for rel in FILES:
 # ---- 5. include guards ------------------------------------------------
 guards = {}
 for rel in FILES[:-1]:
+    if rel.endswith('.mq5'):        # scripts have no include guard (they are not headers)
+        continue
     m = re.findall(r'#ifndef\s+(\w+)', raw[rel])
     if not m:
         problems.append(f"{rel}: missing #ifndef include guard")
@@ -132,7 +137,7 @@ defs = collections.defaultdict(list)
 for rel in FILES:
     for m in func_def.finditer(clean[rel]):
         ret, name = m.group(1), m.group(2)
-        if name in KEYWORDS or '::' in ret:
+        if name in KEYWORDS or '::' in ret or name == 'OnStart':   # each script has its own OnStart
             continue
         defs[name].append(rel)
 for name, where in defs.items():
