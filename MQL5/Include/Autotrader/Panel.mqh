@@ -29,6 +29,7 @@
 #define GLYPH_DOWN  ShortToString(0x25BC)  // triangle down
 #define GLYPH_DASH  ShortToString(0x2014)  // em dash
 #define GLYPH_CHECK ShortToString(0x2713)  // check mark
+#define GLYPH_ARROW ShortToString(0x2192)  // right arrow (entry -> now, stop journey)
 
 //+------------------------------------------------------------------+
 //| One panel: title/drag bar + fixed rows + separators.              |
