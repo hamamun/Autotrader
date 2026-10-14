@@ -125,7 +125,7 @@ at the zone edge`, `Trading — position open, managing the ladder`,
 | 4 | Trade engine: entries, SL logic, TP ladder, break-even | **built** |
 | 5 | Safety layer (news, spread, daily loss, restart-restore) | **built** |
 | 6 | Auto-execution + Win/Loss/BE logging + counters | **built** |
-| 7 | Full validation toward the 98% motto: tester, walk-forward, PBO/CPCV/Deflated Sharpe, permutation test, demo forward (pure MQL5, see PLAN 6C) | **designed, next to build** |
+| 7 | Full validation toward the 98% motto: tester, walk-forward, PBO/Deflated Sharpe, permutation test, demo forward (pure MQL5, see PLAN 6C) | **built — owner runs the tests and the demo** |
 | 8 | Trailing stop | later |
 
 Win/Loss rule (owner's): closed at any positive value = **Win**,

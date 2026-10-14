@@ -478,7 +478,7 @@ for the answer.
 | 4 | Trade engine: entry rules + SL logic + TP ladder + break-even + management (LIVE panel goes live-live) | **BUILT 14 Oct 2026** — `TradeEngine.mqh`. The owner's 60/80/100 ladder with 50/30/20 partials, break-even after TP1, time exit, restart restore. The LIVE TRADING panel is no longer a preview: it shows the real ticket |
 | 5 | Safety layer: news, spread, daily loss, restart-restore | **BUILT 14 Oct 2026** — `SafetyManager.mqh` (7 guards, see 4F) + restore inside `TradeEngine.mqh` |
 | 6 | Auto-execution + Win/Loss/BE logging + counters | **BUILT 14 Oct 2026** — `StatsKeeper.mqh` + the auto-execution wiring in `Autotrader.mq5`. Counters live, CSV audit trail live |
-| 7 | Full validation (tester, walk-forward, PBO/CPCV/Deflated Sharpe, permutation test, demo forward), all pure MQL5 — see 6C. No tuning inside Phase 7 | **DESIGNED — NEXT TO BUILD** |
+| 7 | Full validation (tester, walk-forward, PBO/CPCV/Deflated Sharpe, permutation test, demo forward), all pure MQL5 — see 6C. No tuning inside Phase 7 | **BUILT in MQL5 (14 Oct 2026) — owner compiles, runs tests and demo** |
 | 9 | Fine-tuning (only if Phase 7 fails; then re-run Phase 7) | later |
 | 8 | Trailing stop (owner: later) | after the core is proven |
 
@@ -563,84 +563,74 @@ copied into MT5 (only the `MQL5/` folder is).
 
 ---
 
-## 6C. Phase 7 — the decided design (14 Oct 2026)
+## 6C. Phase 7 — validation (decided 14 Oct 2026, BUILT in MQL5)
 
-**Decision (owner, 14 Oct 2026):** Phase 7 covers all of the validation in one
-phase, no add-ons later. It is written in pure MQL5 only — no Python, nothing
-outside MT5 runs the tests. Trailing stop (Phase 8) and fine-tuning (Phase 9)
-come later. Phase 7 judges the EA **exactly as built**: nothing is tuned inside
-Phase 7, so the zero-inputs rule (decision 17) holds.
+**Owner's decisions:** Phase 7 covers all the validation in one phase, with no add-ons
+later. Pure MQL5 only, no Python in the test path. Trailing stop (Phase 8) and
+fine-tuning (Phase 9) come later. Phase 7 judges the EA **exactly as built**: nothing
+is tuned in Phase 7, so the zero-inputs rule (decision 17) holds and the EA itself
+gets no test code.
 
-### 6C.1 What Phase 7 tests
+### 6C.1 What was built
 
-1. **Data:** MT5 Strategy Tester on real ticks, the longest history the broker
-   gives (target 2 years), four symbol classes (forex majors, gold, crypto,
-   indices), on M5, M15 and M30 charts. Broker spread as recorded.
-2. **Hold-out split (fixed before running):** first 70% of the history is the
-   in-sample period, last 30% is the out-of-sample period. Results are reported
-   for both.
-3. **Walk-forward:** six consecutive windows, each judged on its own and then
-   pooled. Every window is reported; no window is hidden.
-4. **Statistical proof:**
-   - Wilson 95% lower bound on the win rate.
-   - Deflated Sharpe Ratio (corrects for how many trials were run).
-   - Probability of Backtest Overfitting (PBO) by combinatorially symmetric
-     cross-validation, over 12 trials = 4 symbol classes × 3 timeframes.
-   - Combinatorial purged cross-validation (CPCV) with purge = trade duration
-     and a 1-day embargo, to remove information leakage between periods.
-   - Monte Carlo reshuffle of the trade order, for the drawdown range.
-   - Permutation test: the same EA run on bar data shuffled per symbol class,
-     to check whether the edge is better than chance.
-5. **Demo forward:** 4 to 8 weeks on a demo account, judged by the scoreboard
-   and the CSV log (calendar time, run by the owner).
+| File | What it does |
+|------|--------------|
+| `MQL5/Include/Autotrader/Validation.mqh` | the statistics only: normal distribution, Wilson win-rate bound, Deflated Sharpe, drawdown, reshuffle drawdown range, PBO. Used by the scripts, never by the EA |
+| `MQL5/Scripts/Autotrader/Phase7_Report.mq5` | reads the logs, runs gates G1–G9, writes `MQL5\Files\Phase7_Report.txt` and prints PASS/FAIL per gate |
+| `MQL5/Scripts/Autotrader/Phase7_Permutation.mq5` | builds shuffled copies of a symbol as custom symbols for gate G7 |
+| `StatsKeeper.mqh` (small change) | writes one `TRADE` line per finished trade to `Autotrader_log.csv` (result, net, open time, minutes open, lots). Also: a trade that still has an open position no longer counts as Win/Loss/BE until it is fully closed |
 
-### 6C.2 Pass rules (decided)
+The EA's trading logic was **not** changed by Phase 7.
 
-- **Sample size:** at least 200 closed trades out-of-sample (all classes
-  together) and at least 60 closed trades in the demo.
-- **Win rate:** Win ÷ (Win + Loss), BE excluded (owner's rule). Point estimate
-  at least 98%, **and** the Wilson 95% lower bound at least 95%. (With 200 trades,
-  98% gives a lower bound of about 95%, so the lower-bound rule is the real test.)
-- **No degradation:** out-of-sample win rate no more than 3 points below the
-  in-sample win rate.
-- **Deflated Sharpe Ratio:** positive at 95% confidence.
-- **PBO:** below 0.25 to pass; 0.50 or above is a fail.
-- **Permutation test:** p below 0.05 in each of the four symbol classes.
-- **Drawdown:** the 95th-percentile drawdown from the trade-order reshuffle
-  stays inside the safety layer's limits (3% daily loss stand-down, 15% equity
-  floor).
-- **Demo:** same win-rate rule, and no trade lost to an EA fault (protection
-  missing, restart failure, wrong lot).
-- **If anything fails:** the EA stays on demo, the next step is Phase 9
-  fine-tuning, and Phase 7 is re-run from the start on fresh data. Data already
-  used for a failed run is not reused as a pass.
+### 6C.2 How the owner runs it
 
-### 6C.3 What gets built (MQL5 only)
+1. **Real runs (12):** Strategy Tester, real ticks, about 2 years, one run per class
+   and timeframe: FOREX, GOLD, CRYPTO, INDEX × M5, M15, M30. After each run, copy the
+   tester's `Autotrader_log.csv` into `MQL5\Files` as `Phase7_<CLASS>_<TF>.csv`.
+2. **Permutation (G7):** run `Phase7_Permutation` once per class (SourceSymbol = a
+   symbol of that class, ClassName = the class, Shuffles = 20). Then run the EA on
+   **M15** with each `AT_<CLASS>_k` (k = 0..20) in the **same** tester model for all
+   of them. Save each log as `Phase7_PERM_<CLASS>_M15_<k>.csv`. That is 21 runs per
+   class, 84 in total.
+3. **Demo (G9):** 4 to 8 weeks on a demo account. Copy the log as `Phase7_DEMO.csv`.
+4. Run `Phase7_Report`. Read `Phase7_Report.txt`.
 
-- `MQL5/Include/Autotrader/Validation.mqh` — the statistics: Wilson bound,
-  Sharpe per trade, Deflated Sharpe, PBO by CSCV, CPCV path builder, trade-order
-  reshuffle, drawdown percentiles.
-- `MQL5/Scripts/Autotrader/Phase7_Report.mq5` — reads the trade log, splits the
-  periods and windows, runs every gate above, writes a report file to
-  `MQL5\Files` and prints the verdict (PASS / FAIL per gate) in the Experts log.
-- **Trade log extended** with the fields the tests need: entry and exit time,
-  symbol class, timeframe, score, regime, duration, and MAE/MFE.
-- **Permutation test:** a test-only build switch (a compile-time `#define`, not
-  an input). It replaces the bar data with a shuffled copy on a custom symbol.
-  The shipped EA still has zero inputs.
-- **Owner's part:** running the tester, the permutation runs, and the demo.
-  These cannot be run from this workspace.
+### 6C.3 Pass rules (gates)
 
-### 6C.4 Honest notes
+| Gate | Rule |
+|------|------|
+| G1 Sample | at least 200 closed trades out-of-sample (last 30% of the period) |
+| G2 Win rate | Win ÷ (Win + Loss), BE excluded: point **≥ 98%** and Wilson 95% lower bound **≥ 95%** |
+| G3 No degradation | in-sample win rate minus out-of-sample win rate **≤ 3 points** |
+| G4 Window pairs | the period is cut into 6 windows; every pair of windows (15 combinations) is tested; the worst pair's Wilson lower bound must be **≥ 90%** |
+| G5 Deflated Sharpe | probability the per-trade Sharpe is real, after correcting for the 12 runs tried: **≥ 95%** |
+| G6 PBO | Probability of Backtest Overfitting over the 12 runs (8 time blocks, all 70 half-splits): **< 25%** |
+| G7 Permutation | per class (M15): p-value from 20 shuffles against the unshuffled base: **p < 0.05** |
+| G8 Drawdown | 95th percentile drawdown after 1000 reshuffles of the trade order ≤ **15% of balance** |
+| G9 Demo | at least 60 demo trades, win rate ≥ 98%, lower bound ≥ 95% |
 
-- The 98% motto is very demanding. At 200 trades it allows only about 4 losses.
-  If the EA rarely speaks, the trade count will show it; the rules do not hide it.
-- The workspace has no MetaEditor, so the code is checked with the lint tool
-  only. The first real compile is the owner's (F7), as in Phases 3–6.
-- PBO here uses symbol-class × timeframe combinations as the trials, not
-  parameter settings, because Phase 7 does not tune anything. This is a
-  deliberate choice; the burden of multiple testing is still counted by the
-  Deflated Sharpe Ratio.
+**Overall PASS** only if G1–G9 all pass. Any fail → the EA stays on demo, the next
+step is Phase 9 fine-tuning, and Phase 7 is run again on fresh data. Data used in a
+failed run is not reused as a pass.
+
+**Important correction to the 98% rule:** with 200 trades, 3 losses (98.5%) gives a lower
+bound of 95.7% and passes; 4 losses (98.0%) gives 94.97% and fails. So G2 means
+**at most 3 losses in 200 closed trades**.
+
+### 6C.4 Notes
+
+- **Purge and embargo** (CPCV's leakage guard) are not needed here: Phase 7 fits
+  nothing, so no training data can leak into testing. G4 gives the combination check.
+- **PBO** uses the 12 runs (class × timeframe) as the trials, not parameter sets,
+  because nothing is tuned. The multiple-testing burden is counted by G5.
+- The **permutation** copies are built from M5 bars. Compare them only with the
+  unshuffled base (k = 0) run in the same tester model. Real-tick runs are not
+  comparable with them.
+- The 98% motto is very demanding. If the EA rarely trades, the trade count shows it;
+  the gates do not hide it.
+- **Not verified here:** the MQL5 code has not been compiled (no MetaEditor in this
+  workspace). The lint tool and a separate check of the statistics formulas passed. The
+  first real compile (F7) and the first test run are the owner's.
 
 ---
 

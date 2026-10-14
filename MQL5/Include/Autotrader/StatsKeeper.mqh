@@ -40,11 +40,22 @@ private:
    double   g_net[];
    datetime g_last[];
    int      g_n;
+   datetime g_open_t[];   // when the trade opened (first entry deal)
+   int      g_dir[];      // 1 = BUY, 2 = SELL
+   double   g_entry[];    // entry price
+   double   g_vol[];      // total lots entered
+   bool     g_live[];     // still has an open position -> not finished yet
+   //--- trades already written to the audit log (Phase 7 reads them)
+   ulong    l_pid[];
+   int      l_n;
+   datetime m_log_from;   // only trades that finish after the EA started
 
    int      DayKey(void) const;
    int      FindGroup(const ulong pid);
    void     AddGroup(const ulong pid);
    bool     WriteHeader(void);
+   bool     IsLogged(const ulong pid) const;
+   void     LogTrade(const int idx);
 
 public:
             CStatsKeeper(void);
@@ -84,6 +95,8 @@ CStatsKeeper::CStatsKeeper(void)
    m_net_today = 0.0; m_net_all = 0.0;
    m_last_scan = 0;
    g_n = 0;
+   l_n = 0;
+   m_log_from = 0;
   }
 
 int CStatsKeeper::DayKey(void) const
@@ -112,6 +125,7 @@ bool CStatsKeeper::Init(const string symbol, const ulong magic, const string lan
    m_magic    = magic;
    m_lane_tag = lane_tag;
    m_day_key  = DayKey();
+   m_log_from = TimeCurrent();   // trades finishing from now on are logged
 
    //--- signal counters live in terminal global variables, so they
    //--- survive a restart (the magic number already encodes symbol+TF)
@@ -221,9 +235,61 @@ void CStatsKeeper::AddGroup(const ulong pid)
    ArrayResize(g_pid, g_n);
    ArrayResize(g_net, g_n);
    ArrayResize(g_last, g_n);
-   g_pid[g_n - 1]  = pid;
-   g_net[g_n - 1]  = 0.0;
-   g_last[g_n - 1] = 0;
+   ArrayResize(g_open_t, g_n);
+   ArrayResize(g_dir, g_n);
+   ArrayResize(g_entry, g_n);
+   ArrayResize(g_vol, g_n);
+   ArrayResize(g_live, g_n);
+   g_pid[g_n - 1]    = pid;
+   g_net[g_n - 1]    = 0.0;
+   g_last[g_n - 1]   = 0;
+   g_open_t[g_n - 1] = 0;
+   g_dir[g_n - 1]    = 0;
+   g_entry[g_n - 1]  = 0.0;
+   g_vol[g_n - 1]    = 0.0;
+   g_live[g_n - 1]   = false;
+  }
+
+//+------------------------------------------------------------------+
+bool CStatsKeeper::IsLogged(const ulong pid) const
+  {
+   for(int i = 0; i < l_n; i++)
+      if(l_pid[i] == pid)
+         return true;
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| one finished trade -> one audit line (Phase 7 reads these)        |
+//| detail = result;net;open time;minutes open;lots                  |
+//+------------------------------------------------------------------+
+void CStatsKeeper::LogTrade(const int idx)
+  {
+   ArrayResize(l_pid, l_n + 1);
+   l_pid[l_n] = g_pid[idx];
+   l_n++;
+
+   double net = g_net[idx];
+   string res = (MathAbs(net) < 0.005) ? "BE" : ((net > 0) ? "WIN" : "LOSS");
+   int minutes = (int)((g_last[idx] - g_open_t[idx]) / 60);
+   string detail = StringFormat("result=%s;net=%.2f;open=%s;minutes=%d;lots=%.2f",
+                                res, net, TimeToString(g_open_t[idx], TIME_DATE | TIME_SECONDS),
+                                minutes, g_vol[idx]);
+
+   int h = FileOpen(ATST_LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_SHARE_READ, ',');
+   if(h == INVALID_HANDLE)
+      return;
+   FileSeek(h, 0, SEEK_END);
+   int d = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+   FileWrite(h,
+             TimeToString(g_last[idx], TIME_DATE | TIME_SECONDS),
+             m_symbol, m_lane_tag, "TRADE", (g_dir[idx] == 1) ? "BUY" : "SELL",
+             "-", "-", "-",
+             DoubleToString(g_entry[idx], d),
+             "-", "-", "-", "-",
+             DoubleToString(g_vol[idx], 2),
+             detail);
+   FileClose(h);
   }
 
 //+------------------------------------------------------------------+
@@ -270,14 +336,33 @@ bool CStatsKeeper::Scan(const bool force)
       if(HistoryDealGetString(ticket, DEAL_SYMBOL) != m_symbol)
          continue;
       long entry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      ulong pid = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
+      datetime t = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+
+      //--- the opening deal gives the trade's start, direction and price
+      if(entry == DEAL_ENTRY_IN)
+        {
+         int k = FindGroup(pid);
+         if(k < 0)
+           {
+            AddGroup(pid);
+            k = g_n - 1;
+           }
+         if(g_open_t[k] == 0 || t < g_open_t[k])
+           {
+            g_open_t[k] = t;
+            g_dir[k]    = (HistoryDealGetInteger(ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? 1 : 2;
+            g_entry[k]  = HistoryDealGetDouble(ticket, DEAL_PRICE);
+           }
+         g_vol[k] += HistoryDealGetDouble(ticket, DEAL_VOLUME);
+         continue;
+        }
       if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT)
          continue;
 
-      ulong pid = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
       double net = HistoryDealGetDouble(ticket, DEAL_PROFIT) +
                    HistoryDealGetDouble(ticket, DEAL_SWAP) +
                    HistoryDealGetDouble(ticket, DEAL_COMMISSION);
-      datetime t = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
 
       int idx = FindGroup(pid);
       if(idx < 0)
@@ -290,6 +375,25 @@ bool CStatsKeeper::Scan(const bool force)
          g_last[idx] = t;
      }
 
+   //--- a trade that still has an open position is NOT finished yet:
+   //--- its first partial may be banked, but it must not count as a
+   //--- Win or Loss until the whole position is closed
+   for(int i = 0; i < g_n; i++)
+      g_live[i] = false;
+   for(int p = 0; p < PositionsTotal(); p++)
+     {
+      ulong pt = PositionGetTicket(p);
+      if(pt == 0)
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != m_magic)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != m_symbol)
+         continue;
+      int k = FindGroup((ulong)PositionGetInteger(POSITION_IDENTIFIER));
+      if(k >= 0)
+         g_live[k] = true;
+     }
+
    //--- one group = one trade = one result (owner's rule)
    m_win_today = 0; m_loss_today = 0; m_be_today = 0;
    m_win_all = 0;   m_loss_all = 0;   m_be_all = 0;
@@ -297,6 +401,8 @@ bool CStatsKeeper::Scan(const bool force)
 
    for(int i = 0; i < g_n; i++)
      {
+      if(g_live[i])
+         continue;
       double net = g_net[i];
       //--- treat anything under half a cent as exactly zero = BE
       bool is_be = (MathAbs(net) < 0.005);
@@ -312,6 +418,14 @@ bool CStatsKeeper::Scan(const bool force)
          else             m_loss_today++;
          m_net_today += net;
         }
+     }
+
+   //--- write each finished trade to the audit log once (Phase 7 reads it)
+   for(int i = 0; i < g_n; i++)
+     {
+      if(g_live[i] || g_open_t[i] == 0 || g_last[i] <= m_log_from || IsLogged(g_pid[i]))
+         continue;
+      LogTrade(i);
      }
    return true;
   }
