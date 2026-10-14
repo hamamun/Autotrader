@@ -639,6 +639,28 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
          pdir = (lt.regime.Kind() == AT_REGIME_RANGE_BOTTOM) ? 1 : -1;
       else if(vote > 0) pdir = 1;
       else if(vote < 0) pdir = -1;
+      else
+        {
+         //--- the plain vote is tied: read the same witnesses with their
+         //--- own graded lean, so the scoring still appears instead of
+         //--- eight zeros. Display only - the decision score stays 0.
+         int lean = 0;
+         if(lt.nw_slope > 0.0)          lean++;
+         else if(lt.nw_slope < 0.0)     lean--;
+         if(lt.kalman_slope > 0.0)      lean++;
+         else if(lt.kalman_slope < 0.0) lean--;
+         if(lt.decy_osc > 0.0)          lean++;
+         else if(lt.decy_osc < 0.0)     lean--;
+         if(lt.close0 > lt.ss)          lean++;
+         else if(lt.close0 < lt.ss)     lean--;
+         if(lt.lrsi > 0.5)              lean++;
+         else if(lt.lrsi < 0.5)         lean--;
+         lean += lt.vol.cvd_dir;
+         lean += lt.smc.structure_dir;
+         lean += (lt.regime.Score() > 0) ? 1 : ((lt.regime.Score() < 0) ? -1 : 0);
+         if(lean > 0)      pdir = 1;
+         else if(lean < 0) pdir = -1;
+        }
      }
 
    if(pdir != 0)

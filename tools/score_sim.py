@@ -219,31 +219,38 @@ def candidate(vote):
     return 1 if vote >= 3 else (-1 if vote <= -3 else 0)
 
 
-def prov_side(vote, kind):
+def prov_side(vote, kind, lean=0):
     if kind == "RANGE_BOTTOM":
         return 1                      # fade the bottom
     if kind == "RANGE_TOP":
         return -1                     # fade the top
-    return 1 if vote > 0 else (-1 if vote < 0 else 0)
+    if vote > 0:
+        return 1
+    if vote < 0:
+        return -1
+    # plain vote tied: the same witnesses' graded lean decides
+    return 1 if lean > 0 else (-1 if lean < 0 else 0)
 
 
 PROV_CASES = [
     # the owner's BTCUSDm M15 line: vote -1, lane regime RANGE BOTTOM
-    (-1, "RANGE_BOTTOM", 0, 1, "range bottom -> the BUY fade side"),
-    (-4, "RANGE_BOTTOM", -1, -1, "candidate exists -> parts follow it"),
-    (4, "RANGE_MIDDLE", 1, 1, "candidate exists -> parts follow it"),
-    (2, "RANGE_MIDDLE", 0, 1, "no extreme -> the vote's lean (BUY)"),
-    (-2, "TRANSITION", 0, -1, "no extreme -> the vote's lean (SELL)"),
-    (0, "RANGE_MIDDLE", 0, 0, "tied vote, plain range -> parts[n/a]"),
+    (-1, "RANGE_BOTTOM", 0, 0, 1, "range bottom -> the BUY fade side"),
+    (-4, "RANGE_BOTTOM", 0, -1, -1, "candidate exists -> parts follow it"),
+    (4, "RANGE_MIDDLE", 0, 1, 1, "candidate exists -> parts follow it"),
+    (2, "RANGE_MIDDLE", 0, 0, 1, "no extreme -> the vote's lean (BUY)"),
+    (-2, "TRANSITION", 0, 0, -1, "no extreme -> the vote's lean (SELL)"),
+    (0, "RANGE_MIDDLE", 3, 0, 1, "tied vote -> the graded lean (BUY)"),
+    (0, "RANGE_MIDDLE", -2, 0, -1, "tied vote -> the graded lean (SELL)"),
+    (0, "RANGE_MIDDLE", 0, 0, 0, "perfect tie -> parts[n/a]"),
 ]
-for vote, kind, want_cand, want_prov, why in PROV_CASES:
+for vote, kind, lean, want_cand, want_prov, why in PROV_CASES:
     cand = candidate(vote)
-    prov = cand if cand != 0 else prov_side(vote, kind)
+    prov = cand if cand != 0 else prov_side(vote, kind, lean)
     flag = "ok" if (cand == want_cand and prov == want_prov) else "WRONG"
-    print(f"  vote {vote:+d} {kind:12s} -> candidate {cand:+d}, "
+    print(f"  vote {vote:+d} lean {lean:+d} {kind:12s} -> candidate {cand:+d}, "
           f"parts for {prov:+d} ({why}) {flag}")
     if cand != want_cand or prov != want_prov:
-        fails.append(f"provisional side: vote {vote} in {kind}")
+        fails.append(f"provisional side: vote {vote} lean {lean} in {kind}")
 
 # the same evidence, scored for the fade side, is printed - but the decision
 # score stays 0 while the candidate is 0, so it can never clear a threshold

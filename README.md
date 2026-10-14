@@ -134,9 +134,11 @@ When the market gives no side at all (the lane's own witnesses are within ±2 of
 a tie) the CONFIDENCE row and the Experts-log line still show the scoring,
 marked: `Confidence: 54% — BUY-side evidence (no side yet, 92 needed)` and
 `score=0/92 vote=-1 PROV[BUY 54] parts[bias 40 …]`. Those numbers describe the
-side the engine would look at first — a range extreme's fade side, otherwise the
-vote's lean — and are **evidence on screen, never a signal**: the SIGNAL stays
-HOLD, the published score stays 0 and nothing can latch on them.
+side the engine would look at first — the candidate under evaluation, else a
+range extreme's fade side, else the vote's lean (and when the vote is a perfect
+tie, the graded lean of the same witnesses) — and are **evidence on screen,
+never a signal**: the SIGNAL stays HOLD, the published score stays 0 and nothing
+can latch on them.
 
 ## Roadmap (see PLAN.md for the full design)
 
