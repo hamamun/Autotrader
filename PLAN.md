@@ -478,7 +478,8 @@ for the answer.
 | 4 | Trade engine: entry rules + SL logic + TP ladder + break-even + management (LIVE panel goes live-live) | **BUILT 14 Oct 2026** — `TradeEngine.mqh`. The owner's 60/80/100 ladder with 50/30/20 partials, break-even after TP1, time exit, restart restore. The LIVE TRADING panel is no longer a preview: it shows the real ticket |
 | 5 | Safety layer: news, spread, daily loss, restart-restore | **BUILT 14 Oct 2026** — `SafetyManager.mqh` (7 guards, see 4F) + restore inside `TradeEngine.mqh` |
 | 6 | Auto-execution + Win/Loss/BE logging + counters | **BUILT 14 Oct 2026** — `StatsKeeper.mqh` + the auto-execution wiring in `Autotrader.mq5`. Counters live, CSV audit trail live |
-| 7 | Tester + demo validation, threshold tuning toward 98% | **NEXT** |
+| 7 | Full validation (tester, walk-forward, PBO/CPCV/Deflated Sharpe, permutation test, demo forward), all pure MQL5 — see 6C. No tuning inside Phase 7 | **DESIGNED — NEXT TO BUILD** |
+| 9 | Fine-tuning (only if Phase 7 fails; then re-run Phase 7) | later |
 | 8 | Trailing stop (owner: later) | after the core is proven |
 
 Each phase ends with a demo to the owner. Phases 3–6 were built together at the
@@ -559,6 +560,87 @@ index, never counts a bin twice, always keeps VAL ≤ POC ≤ VAH and always
 reaches 70% of the volume.
 All three are development checks only — they are **not** part of the EA and are never
 copied into MT5 (only the `MQL5/` folder is).
+
+---
+
+## 6C. Phase 7 — the decided design (14 Oct 2026)
+
+**Decision (owner, 14 Oct 2026):** Phase 7 covers all of the validation in one
+phase, no add-ons later. It is written in pure MQL5 only — no Python, nothing
+outside MT5 runs the tests. Trailing stop (Phase 8) and fine-tuning (Phase 9)
+come later. Phase 7 judges the EA **exactly as built**: nothing is tuned inside
+Phase 7, so the zero-inputs rule (decision 17) holds.
+
+### 6C.1 What Phase 7 tests
+
+1. **Data:** MT5 Strategy Tester on real ticks, the longest history the broker
+   gives (target 2 years), four symbol classes (forex majors, gold, crypto,
+   indices), on M5, M15 and M30 charts. Broker spread as recorded.
+2. **Hold-out split (fixed before running):** first 70% of the history is the
+   in-sample period, last 30% is the out-of-sample period. Results are reported
+   for both.
+3. **Walk-forward:** six consecutive windows, each judged on its own and then
+   pooled. Every window is reported; no window is hidden.
+4. **Statistical proof:**
+   - Wilson 95% lower bound on the win rate.
+   - Deflated Sharpe Ratio (corrects for how many trials were run).
+   - Probability of Backtest Overfitting (PBO) by combinatorially symmetric
+     cross-validation, over 12 trials = 4 symbol classes × 3 timeframes.
+   - Combinatorial purged cross-validation (CPCV) with purge = trade duration
+     and a 1-day embargo, to remove information leakage between periods.
+   - Monte Carlo reshuffle of the trade order, for the drawdown range.
+   - Permutation test: the same EA run on bar data shuffled per symbol class,
+     to check whether the edge is better than chance.
+5. **Demo forward:** 4 to 8 weeks on a demo account, judged by the scoreboard
+   and the CSV log (calendar time, run by the owner).
+
+### 6C.2 Pass rules (decided)
+
+- **Sample size:** at least 200 closed trades out-of-sample (all classes
+  together) and at least 60 closed trades in the demo.
+- **Win rate:** Win ÷ (Win + Loss), BE excluded (owner's rule). Point estimate
+  at least 98%, **and** the Wilson 95% lower bound at least 95%. (With 200 trades,
+  98% gives a lower bound of about 95%, so the lower-bound rule is the real test.)
+- **No degradation:** out-of-sample win rate no more than 3 points below the
+  in-sample win rate.
+- **Deflated Sharpe Ratio:** positive at 95% confidence.
+- **PBO:** below 0.25 to pass; 0.50 or above is a fail.
+- **Permutation test:** p below 0.05 in each of the four symbol classes.
+- **Drawdown:** the 95th-percentile drawdown from the trade-order reshuffle
+  stays inside the safety layer's limits (3% daily loss stand-down, 15% equity
+  floor).
+- **Demo:** same win-rate rule, and no trade lost to an EA fault (protection
+  missing, restart failure, wrong lot).
+- **If anything fails:** the EA stays on demo, the next step is Phase 9
+  fine-tuning, and Phase 7 is re-run from the start on fresh data. Data already
+  used for a failed run is not reused as a pass.
+
+### 6C.3 What gets built (MQL5 only)
+
+- `MQL5/Include/Autotrader/Validation.mqh` — the statistics: Wilson bound,
+  Sharpe per trade, Deflated Sharpe, PBO by CSCV, CPCV path builder, trade-order
+  reshuffle, drawdown percentiles.
+- `MQL5/Scripts/Autotrader/Phase7_Report.mq5` — reads the trade log, splits the
+  periods and windows, runs every gate above, writes a report file to
+  `MQL5\Files` and prints the verdict (PASS / FAIL per gate) in the Experts log.
+- **Trade log extended** with the fields the tests need: entry and exit time,
+  symbol class, timeframe, score, regime, duration, and MAE/MFE.
+- **Permutation test:** a test-only build switch (a compile-time `#define`, not
+  an input). It replaces the bar data with a shuffled copy on a custom symbol.
+  The shipped EA still has zero inputs.
+- **Owner's part:** running the tester, the permutation runs, and the demo.
+  These cannot be run from this workspace.
+
+### 6C.4 Honest notes
+
+- The 98% motto is very demanding. At 200 trades it allows only about 4 losses.
+  If the EA rarely speaks, the trade count will show it; the rules do not hide it.
+- The workspace has no MetaEditor, so the code is checked with the lint tool
+  only. The first real compile is the owner's (F7), as in Phases 3–6.
+- PBO here uses symbol-class × timeframe combinations as the trials, not
+  parameter settings, because Phase 7 does not tune anything. This is a
+  deliberate choice; the burden of multiple testing is still counted by the
+  Deflated Sharpe Ratio.
 
 ---
 
