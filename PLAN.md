@@ -1,9 +1,16 @@
-# AUTOTRADER — Master Build Plan v3 (pure MQL5)
+# AUTOTRADER — Master Build Plan v4 (pure MQL5)
 
 > Status: Phase 1 (interface) built 12 Oct 2026; Phase 2 (Symbol Intelligence
-> + Regime engine) built 13 Oct 2026, including the owner's expanded,
-> specific Regime labels and the soft eye-friendly interface style.
-> Next step: Phase 3 — direction engine.
+> + Regime engine) built 13 Oct 2026; **Phases 3–6 (direction engine, trade
+> engine, safety layer, auto-execution + scoreboard) built 14 Oct 2026.**
+> The EA now gives real BUY/SELL/HOLD directions with real Entry/SL/TP and
+> trades them by itself.
+> Next step: **Phase 7 — prove it** (Strategy Tester + walk-forward + demo
+> forward, threshold tuning toward the 98% motto). Until Phase 7 signs it off,
+> it runs on a **demo account**.
+> Note: the code cannot be compiled inside this workspace (no MetaEditor), so
+> the first compile in MetaEditor (F7) is the owner's to run; `tools/` holds
+> two Python checkers used while writing it (see section 6B.4).
 
 ---
 
@@ -85,6 +92,10 @@ Panel life-cycle of the SL (visible in LIVE TRADING panel):
 | 12 | Interface style (13 Oct 2026): dark-**grey** body (not black), soft **Segoe UI**, **12pt all rows / 14pt SIGNAL row only**, soft muted colours, and **only SIGNAL + STATUS rows are coloured** — everything else one soft grey. Drag by the title bar; width auto-grows to the widest row. |
 | 13 | **Symbol Intelligence (Phase 2):** zero extra inputs — the EA studies any symbol it is attached to (family, price format, normal wiggle, usual spread, current jumpiness) and auto-sets its hidden dials (stop/target distances, proof threshold, spread limit) relative to what is normal *for that symbol*. |
 | 14 | **Regime labels must be SPECIFIC (13 Oct 2026):** never a bare TRENDING/RANGING. The row must say direction + strength, or where price sits in the range (full agreed list in 3.5). Regime row stays plain soft text (decision #12). |
+| 15 | **Option A locked (14 Oct 2026):** one direction per chart. The panel reports the direction product of the chart's own timeframe (M5 = scalping, M15 = short-term, M30 = intraday) and trades only that lane. Three lanes wanted → three charts, each with its own panel, orders and counters. No extra panel rows were added. |
+| 16 | **Full 2026 indicator stack locked (14 Oct 2026):** Nadaraya–Watson, Ehlers DSP family, Kalman, Smart-Money Concepts and volume-flow tools are all built as Phase 3 evidence — hand-written MQL5, no external library. |
+| 17 | **Still zero inputs (reaffirmed 14 Oct 2026):** Phases 3–6 added *no* user settings. Every new number (weights, thresholds, distances, lot size, news window, daily-loss limit, equity floor) is either measured from the market or derived from the symbol's own profile. `Auto Trading` ON/OFF remains the only control. |
+| 18 | **Demo until proven (14 Oct 2026):** because Phases 3–6 landed together, the EA runs on a demo account until Phase 7 (tester + walk-forward + demo forward) confirms the scoreboard. Real money only after that. |
 
 ---
 
@@ -176,7 +187,7 @@ Row spec:
 | Mark | Entry → current price, floating P/L in USD (and pts) |
 | **Stop Loss** | **the LIVE protective price — always visible. Shows current SL and its journey: `2524.81 (initial)` → `2544.31 (moved to Entry)` → later `trailing @ price`** |
 | Break-Even | mechanism state: `not armed` → `ARMED (after TP1)` → `LOCKED` |
-| Trail Stop | `OFF (phase 2)` now; later: `ACTIVE — trailing @ price` |
+| Trail Stop | `OFF (later phase)` now; Phase 8: `ACTIVE — trailing @ price` |
 | TP1/TP2/TP3 | ladder price + % of D, live status: `✓ HIT time — closed N%` / `pending — NN% progress` / `skipped (manual)` |
 | STATUS | what the manager is doing: running to TP1 / moved SL to Entry / closed for time / closing… |
 
@@ -185,6 +196,12 @@ The LIVE panel's "Stop Loss" row = the **live** SL of the open order (it changes
 initial → Entry → trailing). Both are always on screen.
 
 This is where the owner's TP-ladder idea becomes visible and auditable in real time.
+
+**Built (Phase 4):** this panel is no longer a preview. It appears only while a
+real position or a real pending entry exists (magic number = ours), shows the
+real ticket, the real lot, the real stop and its journey (`initial` → `moved to
+Entry`), the real ladder state per level (`✓ HIT 14:51 — closed 50% of lot`,
+`pending — 68% progress to target`), and what the manager is doing right now.
 
 ### 3.4 Incompatible chart behavior (owner rule)
 
@@ -259,16 +276,19 @@ history is short). No panel rows were added — the locked interface in
 3.2/3.3 is unchanged apart from the Regime/STATUS text itself.
 
 Note: even on an M5 chart, the engine internally reads all three timeframes
-(M30 bias → M15 setup → M5 trigger). The chart's TF decides which
-**direction product** the panel reports:
+(M30 bias → M15 setup → M5 trigger). **This is now built** (`MarketData.mqh`
+keeps one closed-bar cache per timeframe; `DirectionEngine.mqh` holds three
+`CTFAnalysis` snapshots). The chart's TF decides which **direction product**
+the panel reports:
 
-| Chart TF | Direction product | Style |
-|----------|-------------------|-------|
-| M5  | trade trigger & entry timing | scalping |
-| M15 | short-term setup direction | short-term |
-| M30 | intraday bias direction | intraday |
+| Chart TF | Direction product | Style | Built |
+|----------|-------------------|-------|-------|
+| M5  | trade trigger & entry timing | scalping | ✔ lane `AT_LANE_M5` |
+| M15 | short-term setup direction | short-term | ✔ lane `AT_LANE_M15` |
+| M30 | intraday bias direction | intraday | ✔ lane `AT_LANE_M30` |
 
-**Open to owner — the A/B question explained visually:**
+**The A/B question — DECIDED: Option A, locked 14 Oct 2026 (decision #15).**
+Option B is kept below for reference only and is not built.
 
 **Option A — one direction per chart (default):**
 the panel shows the direction product of **the chart's timeframe**.
@@ -303,7 +323,7 @@ Both options use the exact same visual style and rows.
 
 ## 4. The technology (pure MQL5, self-adapting, zero training)
 
-### A. Symbol Intelligence (auto-configuration engine)
+### A. Symbol Intelligence (auto-configuration engine) — BUILT (Phase 2)
 On attach to any chart, and continuously afterwards:
 - class detection: forex / metals / crypto / indices / energy (your ETHUSDm = crypto),
 - micro-structure: digits, point, tick size/value, contract size, margin rules,
@@ -313,35 +333,57 @@ On attach to any chart, and continuously afterwards:
   trailing speed, break-even trigger, confidence threshold, lot sizing,
 - keeps re-calibrating as conditions change (owner motto: adapt to the symbol).
 
-### B. Regime Engine ("Regime:" row)
+### B. Regime Engine ("Regime:" row) — BUILT (Phase 2)
 TRENDING / RANGING / VOLATILE / QUIET via efficiency ratio + adaptive decycler
 (Ehlers cycle/trend separation), ATR percentile, structure persistence.
 Behavior switches: TRENDING → pullback continuation; RANGING → mean reversion
 at envelope extremes; VOLATILE/QUIET → mostly HOLD (protects the 98%).
 
-### C. Modern Indicator Layer (2026 stack — researched Oct 2026)
+### C. Modern Indicator Layer (2026 stack) — BUILT (Phase 3, `ModernIndicators.mqh`)
 1. **Nadaraya–Watson kernel regression (Gaussian), non-repainting variant** —
-   trend baseline, dynamic zones, and realistic TP references (adaptive bandwidth).
-2. **Ehlers DSP filters** — Gaussian/Super Smoother, Decycler Oscillator,
-   Adaptive Laguerre, Laguerre RSI (near-zero-lag triggers, replace slow MACD-style logic).
-3. **Kalman filter** trend line — clean "true price" for structure breaks.
-4. **Regime-weighted confluence oscillator (0–100)** — each evidence source
-   weighted by the current regime; feeds the Confidence % row.
-5. **Smart-Money Concepts engine** — BOS/CHoCH, order blocks, fair value gaps,
-   liquidity sweeps. Still the backbone of pro entries in 2026.
-6. **Volume-flow tools** — tick-volume delta (CVD-style), session volume profile,
-   anchored VWAP (MT5 tick volume is sufficient as confluence).
-7. **Classics that still earn their place:** ATR (SL/TP sizing), EMA200 (baseline),
-   spread monitor. Nothing else old without a reason.
+   `ATMI_NW()`. Fits each bar from that bar and the bars *before* it only, so
+   the line can never redraw itself. Bandwidth adapts to how wild the market is
+   right now; the envelope is ±2 × the fit's own weighted mean absolute error.
+   Used as trend baseline, slope evidence and the fallback entry zone.
+2. **Ehlers DSP filters** — `ATMI_SuperSmoother()` (10-bar 2-pole Butterworth),
+   `ATMI_Decycler()` / `ATMI_DecyclerOscPct()` (20-bar cycle cut),
+   `ATMI_LaguerreRSI()` with **adaptive gamma** (a clean move gets a faster
+   filter, chop gets a slower one). Near-zero-lag triggers, no MACD-style lag.
+3. **Kalman filter** trend line — `ATMI_Kalman()` / `ATMI_KalmanSlope()`,
+   local-level model whose process/measurement noise come from the symbol's own
+   ATR, so it trusts price in calm markets and smooths harder in noisy ones.
+4. **Regime-weighted confluence score (0–100)** — eight evidence groups, each
+   weighted by the current regime (section 8.2). Feeds the Confidence % row.
+5. **Smart-Money Concepts engine** — `SmartMoney.mqh`: confirmed swing structure
+   (HH/HL vs LH/LL), BOS, CHoCH, order blocks (last opposite candle before the
+   displacement, with mitigation checks), fair value gaps (3-candle imbalance,
+   with fill checks), liquidity sweeps (wick through an old high/low closing back
+   inside), and the nearest usable demand/supply zone per side with its distance
+   in ATRs.
+6. **Volume-flow tools** — `VolumeFlow.mqh`: tick-volume delta (CVD-style) and
+   its 5-bar slope, participation ratio vs the symbol's own average, session
+   volume profile (POC / VAH / VAL, 24 bins, 70% value area), session VWAP and
+   rolling 100-bar VWAP.
+7. **Classics that still earn their place:** Wilder ATR (SL/TP sizing),
+   EMA 20/50/100/200 (baseline + stack), efficiency ratio, spread monitor.
+   Nothing else old without a reason.
 
-### D. Direction & Confidence Engine (the heart of the 98%)
+### D. Direction & Confidence Engine (the heart of the 98%) — BUILT (Phase 3, `DirectionEngine.mqh`)
 Evidence checklist with regime-adjusted weights (0–100):
 M30 bias, M15 structure, M5 trigger, zone quality (OB/FVG/liquidity),
 momentum (modern oscillators), volume agreement, volatility fitness, quote quality.
 - Score ≥ threshold (auto per symbol class, ~85–90) → BUY/SELL.
 - Below → HOLD (the default state). M5/M15 never fight M30.
 
-### E. Trade Management Engine (feeds the LIVE TRADING panel)
+**As built (Phase 3):** the regime also decides *which* direction is allowed —
+a trend may only be continued, a pullback may only be taken with the trend, a
+range may only be faded at its TOP/BOTTOM, and VOLATILE / QUIET / TRANSITION /
+range-MIDDLE are hard HOLD territory. Signals are **latched** with hysteresis
+(released only 8 points below the line, or on a veto, a direction flip, or old
+age) so the panel never flickers. Every rejection writes its reason into the
+STATUS row and the audit log.
+
+### E. Trade Management Engine (feeds the LIVE TRADING panel) — BUILT (Phase 4, `TradeEngine.mqh`)
 - Entry: limit at zone edge or confirmation close.
 - SL: structural level + ATR buffer; if price is in "open space" (e.g. near
   all-time high) → volatility SL (ATR-based); if even that is absurd → no trade.
@@ -351,16 +393,61 @@ momentum (modern oscillators), volume agreement, volatility fitness, quote quali
 - Time exit if trade stalls beyond Expected Duration.
 - State survives restart / reconnection (position state restored, panel redraws).
 
-### F. Risk & Safety Manager
+**As built (Phase 4):** lot size = equity × risk dial ÷ (stop distance valued in
+account money), normalised to the broker's volume step and re-checked against
+free margin; the broker's own minimum lot is refused if it would risk more than
+3× the dial. Entry is a LIMIT at the zone edge when a valid zone sits 0.05–0.60
+ATR away on the right side, otherwise a market entry at the confirmation quote.
+The stop is structural + 0.25 ATR when a usable swing sits 0.55–3.0 ATR away,
+else the volatility stop (`sl_mult` × ATR), always ≥ the broker stops level and
+the spread, and the trade is refused if the stop would exceed 3.5 ATR or 3% of
+price. TP3 is set broker-side at open (so the target survives even if the EA
+dies), TP1/TP2 partials are sent by the EA, break-even moves the stop to Entry
+the moment TP1 banks, and a trade that never reaches TP1 within 1.5× its
+expected duration is closed for time. Protection is re-checked and repaired on
+every pass (at most once per 5 s, so a refusing broker is never hammered).
+Restore reads the broker's own position/order data plus two terminal global
+variables per ticket (starting volume, expected duration); if those are gone the
+ladder state is inferred from the remaining volume and whether the stop already
+sits at Entry.
+
+### F. Risk & Safety Manager — BUILT (Phase 5, `SafetyManager.mqh`)
 Risk % per trade (auto, ~1% baseline), auto lot size, max daily loss stand-down
 (account protection — not session blocking), news shock freeze (MQL5 calendar),
 spread explosion guard, weekend gap guard, slippage limits, magic numbers,
 equity floor. STATUS line reports any safety condition in plain words.
 
-### G. Execution & Feedback
+**As built (Phase 5), in the order the guards are checked:** terminal / EA /
+account / expert trading permissions → broker symbol trade mode → quote age
+(> 120 s = no fresh quote, and a stale weekend quote is named as such for
+non-crypto symbols) → spread vs the symbol's own limit → HIGH-impact news for
+either of the symbol's currencies (no new entries from 30 min before to 15 min
+after; if the calendar cannot be reached the guard switches itself off and says
+so in the log rather than blocking forever) → gap shock (a new bar opening more
+than 3 ATR away freezes entries for 3 bars) → today's realised loss vs 3% of the
+day-start equity (stand-down until tomorrow) → equity below 85% of its recorded
+high-water mark. Day-start equity and the high-water mark live in terminal global
+variables, so a restart cannot erase them. The magic number is derived from the
+symbol + timeframe (never an input), so each chart lane stays isolated and manual
+trades are never touched. Slippage/deviation is fixed in points; requotes, price
+changed, off-quotes and timeouts are retried up to 3 times.
+
+### G. Execution & Feedback — BUILT (Phase 6, `StatsKeeper.mqh`)
 Fully automatic order sending (slippage-aware, retry logic), every signal logged
 to CSV (signal, score, prices, outcome) → feeds Today / All Time counters and
 lets us audit the 98% at any time.
+
+**As built (Phase 6):** counters are computed from the broker's own deal history
+filtered by magic + symbol, with closing deals **grouped by position id** so that
+one trade = one result even though the ladder closes it in three pieces. The
+owner's rule is applied to the group's net result (profit + swap + commission):
+positive = Win, negative = Loss, |net| < half a cent = BE. Today's numbers use the
+same pass with the day's start as the cut. Signal counts (BUY/SELL latches only —
+HOLD is not a "signal") are kept in terminal global variables so they survive a
+restart. Every signal, open, cancel, failure, ladder step and close is appended
+to `MQL5\Files\Autotrader_log.csv` (rotated at 4 MB), and the Experts log gets
+one audit line per closed lane bar with the full score breakdown and the reason
+for the answer.
 
 ---
 
@@ -380,18 +467,85 @@ lets us audit the 98% at any time.
 |-------|-------------|-------|
 | 1 | MAIN + LIVE TRADING panels, exact look, drag + auto-size, live quotes, sample states (incl. incompatible chart view) | **BUILT** — in `MQL5/`. Preview cycles BUY→HOLD→SELL every ~20s. Look revised 13 Oct 2026 (soft/dark-grey, 12/14pt, drag + width fixes, decision #12) |
 | 2 | Symbol Intelligence + Regime Engine | **BUILT** 13 Oct 2026 — `SymbolIntelligence.mqh` + `RegimeEngine.mqh`; Regime row live with the expanded labels (3.5), profile dials auto-set (3.6). Signals still preview until Phase 3 |
-| 3 | Direction engine (M30→M15→M5) + Confidence % | BUY/SELL/HOLD live |
-| 4 | Trade engine: entry rules + SL logic + TP ladder + break-even + management (LIVE panel goes live-live) | owner's TP idea |
-| 5 | Safety layer: news, spread, daily loss, restart-restore | |
-| 6 | Auto-execution + Win/Loss/BE logging + counters | fully automatic at last |
-| 7 | Tester + demo validation, threshold tuning toward 98% | prove it |
-| 8 | Trailing stop (owner: later) | after core is proven |
+| 3 | Direction engine (M30→M15→M5) + Confidence % | **BUILT 14 Oct 2026** — `MarketData.mqh`, `ModernIndicators.mqh`, `SmartMoney.mqh`, `VolumeFlow.mqh`, `DirectionEngine.mqh`. Real BUY/SELL/HOLD, latched, with real reachable Entry/SL/TP |
+| 4 | Trade engine: entry rules + SL logic + TP ladder + break-even + management (LIVE panel goes live-live) | **BUILT 14 Oct 2026** — `TradeEngine.mqh`. The owner's 60/80/100 ladder with 50/30/20 partials, break-even after TP1, time exit, restart restore. The LIVE TRADING panel is no longer a preview: it shows the real ticket |
+| 5 | Safety layer: news, spread, daily loss, restart-restore | **BUILT 14 Oct 2026** — `SafetyManager.mqh` (7 guards, see 4F) + restore inside `TradeEngine.mqh` |
+| 6 | Auto-execution + Win/Loss/BE logging + counters | **BUILT 14 Oct 2026** — `StatsKeeper.mqh` + the auto-execution wiring in `Autotrader.mq5`. Counters live, CSV audit trail live |
+| 7 | Tester + demo validation, threshold tuning toward 98% | **NEXT** |
+| 8 | Trailing stop (owner: later) | after the core is proven |
 
-Each phase ends with a demo to the owner.
+Each phase ends with a demo to the owner. Phases 3–6 were built together at the
+owner's request on 14 Oct 2026, so their demo is one bigger demo: compile in
+MetaEditor (F7), attach to a **demo** chart on M5/M15/M30, and watch the panel,
+the Experts log and the scoreboard.
+
+---
+
+## 6B. Phase 3–6 as built — the file map and the judge's weights
+
+### 6B.1 File map (all pure MQL5, no DLL, no Python, no external data)
+
+| File | Lines of work | What it is |
+|---|---|---|
+| `MQL5/Experts/Autotrader/Autotrader.mq5` | the EA | wires everything: panels, engines, auto-execution, events |
+| `Include/Autotrader/Panel.mqh` | Phase 1 | MAIN + LIVE panels, drag, auto-size, 12/14pt soft style (+ redraw economy since Phase 3) |
+| `Include/Autotrader/SymbolIntelligence.mqh` | Phase 2 | symbol profile + the hidden dials (+ broker stops level, currencies, trade mode since Phase 3) |
+| `Include/Autotrader/RegimeEngine.mqh` | Phase 2 | the 11 specific regime labels (+ raw evidence getters since Phase 3) |
+| `Include/Autotrader/MarketData.mqh` | Phase 3 | one closed-bar cache per timeframe, new-bar detection, M30+M15+M5 on any chart |
+| `Include/Autotrader/ModernIndicators.mqh` | Phase 3 | Nadaraya–Watson, Ehlers (Super Smoother / Decycler / Laguerre RSI), Kalman, ATR, EMA, VWAP, efficiency |
+| `Include/Autotrader/SmartMoney.mqh` | Phase 3 | structure, BOS/CHoCH, order blocks, FVG, liquidity sweeps, zones |
+| `Include/Autotrader/VolumeFlow.mqh` | Phase 3 | CVD-style delta, participation ratio, session volume profile, VWAPs |
+| `Include/Autotrader/DirectionEngine.mqh` | Phase 3 | the judge: three timeframes, 8 evidence groups, gates, latch, real Entry/SL/TP |
+| `Include/Autotrader/SafetyManager.mqh` | Phase 5 | the seven freeze guards |
+| `Include/Autotrader/StatsKeeper.mqh` | Phase 6 | Win/Loss/BE scoreboard + CSV audit trail |
+| `Include/Autotrader/TradeEngine.mqh` | Phase 4 | lots, orders, ladder, break-even, time exit, protection repair, restore |
+
+### 6B.2 The judge's weights (regime-adjusted, sum = 1.00)
+
+| Evidence group | TRENDING | PULLBACK | RANGE extreme | anything else |
+|---|---|---|---|---|
+| M30 bias | .20 | .20 | .12 | .15 |
+| M15 + lane structure | .18 | .16 | .12 | .15 |
+| M5 trigger | .12 | .14 | .14 | .15 |
+| Zone quality (OB/FVG/sweep/NW/POC) | .10 | .16 | .24 | .15 |
+| Momentum (NW + Kalman + Decycler + SuperSmoother + Laguerre) | .18 | .12 | .10 | .15 |
+| Volume (delta + participation + VWAP side) | .08 | .08 | .14 | .10 |
+| Volatility fitness (ATR ratio + efficiency + beats the spread) | .08 | .08 | .08 | .10 |
+| Quote quality (spread vs limit + tick freshness) | .06 | .06 | .06 | .05 |
+
+Score = 100 × Σ (weight × evidence). Speak only at ≥ the symbol's auto-set
+threshold; release a latched signal only below threshold − 8.
+
+### 6B.3 Hard gates (a veto means HOLD whatever the score says)
+
+regime not tradeable (VOLATILE / QUIET / TRANSITION / CALIBRATING / range
+middle) · wrong side of the regime for that direction · M5/M15 fighting the M30
+bias · M30 itself VOLATILE · spread above the symbol's own limit · quote older
+than 120 s · stop wider than 3.5 ATR or 3% of price · risk:reward below 1:1.5 ·
+target not reachable inside the lane's window (M5 8 h, M15 16 h, M30 32 h) ·
+plus everything the safety layer adds (section 4F).
+
+### 6B.4 Checks used while writing it (no MetaEditor in this workspace)
+
+`tools/mql5_lint.py` — bracket balance, unique include guards, no duplicate
+global definitions, every declared class method defined (and every definition
+declared), every method the EA calls on its own objects really exists, and a
+blocklist of MQL5 calls that do not exist. `tools/score_sim.py` — re-states the
+decision and money arithmetic and asserts: the four weight sets sum to 1.00,
+random noise never reaches the threshold (HOLD is the default state), all 15
+regime/direction gate combinations behave as designed, risk-sized lots never
+exceed the dial by more than the small-account allowance, the 50/30/20 ladder
+always closes exactly the opening volume after volume-step rounding, and the
+owner's Win/Loss/BE rule reproduces the four cases in section 1.
+Both are development checks only — they are **not** part of the EA and are never
+copied into MT5 (only the `MQL5/` folder is).
 
 ---
 
 ## 7. One-line summary
+
+> **14 Oct 2026: everything in the sentence below is built except the proving
+> (Phase 7). Until then it trades on a demo account.**
 
 > A **pure MQL5, input-free, self-calibrating EA** for any symbol on M5/M15/M30
 > charts: 2026-modern signal science inside a regime-aware confluence judge that

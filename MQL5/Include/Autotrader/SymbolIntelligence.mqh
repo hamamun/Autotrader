@@ -46,6 +46,13 @@ struct SATSymbolProfile
    double               volume_step;
    long                 spread_now_pts;
    double               spread_typical_pts; // average of sampled spreads
+   //--- broker trading rules (needed for REAL, reachable levels)
+   long                 stops_level_pts;    // minimum SL/TP distance, points
+   double               stops_level_price;  // ...the same, in price units
+   long                 freeze_level_pts;   // modification freeze distance
+   bool                 trade_enabled;      // broker allows trading this symbol
+   string               base_currency;      // for the news guard
+   string               profit_currency;
    //--- how the symbol normally behaves (price units, chart timeframe)
    double               atr_price;          // current typical wiggle size
    double               atr_baseline;       // longer-run typical wiggle
@@ -174,6 +181,37 @@ public:
    double            SlMult(void)             const { return m_profile.sl_mult; }
    double            TpMult(void)             const { return m_profile.tp_mult; }
    int               ConfidenceThreshold(void) const { return m_profile.confidence_threshold; }
+   //--- Phase 3+ getters: the direction, trade and safety engines read
+   //--- the rest of the measured profile through these.
+   string            Symbol(void)             const { return m_profile.symbol; }
+   int               Digits(void)             const { return m_profile.digits; }
+   double            Point(void)              const { return m_profile.point; }
+   double            TickSize(void)           const { return m_profile.tick_size; }
+   double            TickValue(void)          const { return m_profile.tick_value; }
+   double            ContractSize(void)       const { return m_profile.contract_size; }
+   double            VolumeMin(void)          const { return m_profile.volume_min; }
+   double            VolumeMax(void)          const { return m_profile.volume_max; }
+   double            VolumeStep(void)         const { return m_profile.volume_step; }
+   long              SpreadNowPts(void)       const { return m_profile.spread_now_pts; }
+   double            SpreadLimitPts(void)     const { return m_profile.spread_limit_pts; }
+   double            RiskPct(void)            const { return m_profile.risk_pct; }
+   double            AtrPct(void)             const { return m_profile.atr_pct; }
+   double            AtrBaseline(void)        const { return m_profile.atr_baseline; }
+   int               BarsUsed(void)           const { return m_profile.bars_used; }
+   long              StopsLevelPts(void)      const { return m_profile.stops_level_pts; }
+   double            StopsLevelPrice(void)    const { return m_profile.stops_level_price; }
+   long              FreezeLevelPts(void)     const { return m_profile.freeze_level_pts; }
+   bool              TradeEnabled(void)       const { return m_profile.trade_enabled; }
+   string            BaseCurrency(void)       const { return m_profile.base_currency; }
+   string            ProfitCurrency(void)     const { return m_profile.profit_currency; }
+   datetime          Updated(void)            const { return m_profile.updated; }
+   //--- one spread check used by the safety layer every tick
+   bool              SpreadOk(void)           const
+     {
+      if(m_profile.spread_limit_pts <= 0.0)
+         return true;
+      return ((double)m_profile.spread_now_pts <= m_profile.spread_limit_pts);
+     }
    //--- note: no whole-struct getter - callers use the typed getters
    //--- above (keeps this header to plain, portable MQL5 constructs)
   };
@@ -196,6 +234,12 @@ CSymbolIntelligence::CSymbolIntelligence(void)
    m_profile.volume_step = 0.0;
    m_profile.spread_now_pts = 0;
    m_profile.spread_typical_pts = 0.0;
+   m_profile.stops_level_pts = 0;
+   m_profile.stops_level_price = 0.0;
+   m_profile.freeze_level_pts = 0;
+   m_profile.trade_enabled = true;
+   m_profile.base_currency = "";
+   m_profile.profit_currency = "";
    m_profile.atr_price = 0.0;
    m_profile.atr_baseline = 0.0;
    m_profile.atr_ratio = 0.0;
@@ -267,6 +311,20 @@ bool CSymbolIntelligence::Refresh(const string symbol, const ENUM_TIMEFRAMES tf)
    m_profile.volume_min   = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    m_profile.volume_max   = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
    m_profile.volume_step  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+
+   //--- broker trading rules: these make the printed Entry/SL/TP REAL.
+   //--- No level closer than the stops level can ever be placed.
+   m_profile.stops_level_pts  = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   m_profile.freeze_level_pts = SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   m_profile.stops_level_price = (double)m_profile.stops_level_pts * m_profile.point;
+
+   ENUM_SYMBOL_TRADE_MODE tmode =
+      (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+   m_profile.trade_enabled = (tmode == SYMBOL_TRADE_MODE_FULL ||
+                              tmode == SYMBOL_TRADE_MODE_LONGONLY ||
+                              tmode == SYMBOL_TRADE_MODE_SHORTONLY);
+   m_profile.base_currency   = SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE);
+   m_profile.profit_currency = SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT);
 
    //--- typical spread: keep a running average of live samples
    m_profile.spread_now_pts = SymbolInfoInteger(symbol, SYMBOL_SPREAD);

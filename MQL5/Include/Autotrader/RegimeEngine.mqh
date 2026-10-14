@@ -60,6 +60,13 @@ struct SATRegimeInfo
    double         atr_ratio;      // current wiggle vs its own normal
    double         range_pos;      // 0 = range bottom, 1 = range top
    int            bars_used;
+   //--- Phase 3 reads these too (the direction engine's evidence)
+   double         atr;            // current wiggle size, price units
+   double         slope50;        // EMA50 slope in ATRs over 10 bars
+   int            score;          // direction agreement, -5..+5
+   double         range_hi;       // recent 60-bar range top
+   double         range_lo;       // recent 60-bar range bottom
+   int            sign_changes;   // how two-way the last 12 candles were
   };
 
 //+------------------------------------------------------------------+
@@ -100,6 +107,29 @@ public:
    ENUM_AT_REGIME    Kind(void)       const { return m_info.kind; }
    int               Direction(void)  const { return m_info.direction; }
    string            Display(void)    const { return m_info.display; }
+   //--- Phase 3+ getters: the direction engine reads the raw evidence
+   //--- behind the label, not just the label itself.
+   double            Efficiency(void) const { return m_info.efficiency; }
+   double            AtrRatio(void)   const { return m_info.atr_ratio; }
+   double            RangePos(void)   const { return m_info.range_pos; }
+   int               BarsUsed(void)   const { return m_info.bars_used; }
+   double            Atr(void)        const { return m_info.atr; }
+   double            Slope50(void)    const { return m_info.slope50; }
+   int               Score(void)      const { return m_info.score; }
+   double            RangeHi(void)    const { return m_info.range_hi; }
+   double            RangeLo(void)    const { return m_info.range_lo; }
+   int               SignChanges(void) const { return m_info.sign_changes; }
+   bool              IsTrend(void)    const
+     { return (m_info.kind == AT_REGIME_TREND_UP || m_info.kind == AT_REGIME_TREND_DOWN); }
+   bool              IsPullback(void) const
+     { return (m_info.kind == AT_REGIME_PULLBACK_UP || m_info.kind == AT_REGIME_PULLBACK_DOWN); }
+   bool              IsRangeExtreme(void) const
+     { return (m_info.kind == AT_REGIME_RANGE_TOP || m_info.kind == AT_REGIME_RANGE_BOTTOM); }
+   //--- tradable = a direction may be spoken at all in this regime.
+   //--- VOLATILE / QUIET / TRANSITION / CALIBRATING / range-middle are
+   //--- HOLD territory by design (this is what protects the 98%).
+   bool              Tradable(void)   const
+     { return (IsTrend() || IsPullback() || IsRangeExtreme()); }
    //--- note: no whole-struct getter - callers use the typed getters
    //--- above (keeps this header to plain, portable MQL5 constructs)
   };
@@ -117,6 +147,12 @@ CRegimeEngine::CRegimeEngine(void)
    m_info.atr_ratio = 0.0;
    m_info.range_pos = 0.5;
    m_info.bars_used = 0;
+   m_info.atr = 0.0;
+   m_info.slope50 = 0.0;
+   m_info.score = 0;
+   m_info.range_hi = 0.0;
+   m_info.range_lo = 0.0;
+   m_info.sign_changes = 0;
   }
 
 void CRegimeEngine::SetInfo(const ENUM_AT_REGIME kind, const int dir,
@@ -170,6 +206,7 @@ bool CRegimeEngine::Refresh(const string symbol, const ENUM_TIMEFRAMES tf)
      }
    double atr = tr_now / 14.0;
    double atr_base = (tr_base > 0.0) ? tr_base / 100.0 : atr;
+   m_info.atr = atr;
    if(atr <= 0.0)
      {
       SetInfo(AT_REGIME_CALIBRATING, 0,
@@ -220,6 +257,11 @@ bool CRegimeEngine::Refresh(const string symbol, const ENUM_TIMEFRAMES tf)
       r_lo = MathMin(r_lo, rates[i].low);
      }
    m_info.range_pos = (r_hi > r_lo) ? (close0 - r_lo) / (r_hi - r_lo) : 0.5;
+   //--- keep the raw evidence for the Phase 3 direction engine
+   m_info.slope50 = slope50;
+   m_info.score   = score;
+   m_info.range_hi = r_hi;
+   m_info.range_lo = r_lo;
 
    //--- how two-way are the recent candles? (for VOLATILE)
    int sign_changes = 0, prev_sign = 0;
@@ -230,6 +272,7 @@ bool CRegimeEngine::Refresh(const string symbol, const ENUM_TIMEFRAMES tf)
          sign_changes++;
       prev_sign = s;
      }
+   m_info.sign_changes = sign_changes;
 
    double ret8 = (close0 - rates[8].close) / atr;   // last 8 bars, in ATRs
 

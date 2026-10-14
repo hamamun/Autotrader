@@ -62,6 +62,10 @@ private:
    //--- drag state
    bool              m_drag;
    int               m_grab_dx, m_grab_dy;
+   //--- redraw economy: the panel is only re-measured/re-placed when a
+   //--- row's TEXT actually changed (Phase 3+ computes far more per tick)
+   bool              m_dirty;
+   bool              m_placed;
 
    int               Scale(const int v) const
      { return (int)MathRound(v * m_scale); }
@@ -95,7 +99,7 @@ public:
    void              SetSeparator(const int idx, const bool on);
    void              SetRowFontSize(const int idx, const int size);
    void              SetSignalRow(const int idx);   // row shown at 14pt
-   void              Layout(void);          // auto-size + place
+   void              Layout(const bool force = false);   // auto-size + place
    void              Move(const int x, const int y);
    void              SetVisible(const bool vis);
 
@@ -122,6 +126,8 @@ CInfoPanel::CInfoPanel(void)
    m_row_count  = 0;
    m_drag       = false;
    m_grab_dx = m_grab_dy = 0;
+   m_dirty      = true;
+   m_placed     = false;
    m_signal_row = -1;
    //--- soft, rounded, eye-friendly UI font (ships with Windows/MT5).
    //--- (Consolas was monospace and sharp/hard on the eyes.)
@@ -230,7 +236,7 @@ bool CInfoPanel::Create(const long chart_id, const int subwin,
         }
      }
 
-   Layout();
+   Layout(true);
    return true;
   }
 
@@ -254,6 +260,8 @@ void CInfoPanel::Destroy(void)
 //+------------------------------------------------------------------+
 void CInfoPanel::SetTitle(const string title)
   {
+   if(m_rows[0] != title)
+      m_dirty = true;
    m_rows[0] = title;
    m_row_colors[0] = CLR_TITLE;
   }
@@ -265,6 +273,8 @@ void CInfoPanel::SetRow(const int idx, const string text, const color clr)
   {
    if(idx < 0 || idx >= m_row_count)
       return;
+   if(m_rows[idx] != text || m_row_colors[idx] != clr)
+      m_dirty = true;
    m_rows[idx]       = text;
    m_row_colors[idx] = clr;
   }
@@ -274,6 +284,8 @@ void CInfoPanel::SetSeparator(const int idx, const bool on)
   {
    if(idx < 0 || idx >= m_row_count)
       return;
+   if(m_sep_after[idx] != on)
+      m_dirty = true;
    m_sep_after[idx] = on;
   }
 
@@ -284,6 +296,8 @@ void CInfoPanel::SetRowFontSize(const int idx, const int size)
   {
    if(idx < 0 || idx >= 24 || size <= 0)
       return;
+   if(m_row_font[idx] != size)
+      m_dirty = true;
    m_row_font[idx] = size;
    if(m_row_count > 0 && ObjectFind(m_chart, RowName(idx)) >= 0)
       ObjectSetInteger(m_chart, RowName(idx), OBJPROP_FONTSIZE, size);
@@ -301,15 +315,20 @@ void CInfoPanel::SetSignalRow(const int idx)
    m_signal_row = idx;
    SetRowFontSize(idx, m_font_signal);
    if(m_row_count > 0)
-      Layout();
+      Layout(true);
   }
 
 //+------------------------------------------------------------------+
 //| auto-size to content + place everything                           |
 //+------------------------------------------------------------------+
-void CInfoPanel::Layout(void)
+void CInfoPanel::Layout(const bool force)
   {
    if(m_row_count <= 0)
+      return;
+   //--- redraw economy: nothing changed since the last placement and we
+   //--- are not forced (init / font change) -> skip the whole measure
+   //--- and re-place pass. Saves ~120 object writes per tick.
+   if(!force && m_placed && !m_dirty)
       return;
 
    //--- Measure EVERY row with the exact font/size it is drawn with.
@@ -348,6 +367,7 @@ void CInfoPanel::Layout(void)
    m_h += seps * m_sep_h;
 
    PlaceObjects();
+   m_dirty = false;
   }
 
 //+------------------------------------------------------------------+
@@ -400,6 +420,7 @@ void CInfoPanel::PlaceObjects(void)
          y += m_sep_h;
         }
      }
+   m_placed = true;
    ChartRedraw(m_chart);
   }
 
