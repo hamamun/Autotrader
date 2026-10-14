@@ -13,6 +13,8 @@
 //|   Phase7_DEMO.csv                 demo forward log                |
 //| Each file is the EA's Autotrader_log.csv from that run, renamed.  |
 //+------------------------------------------------------------------+
+// Install the repo's MQL5/Include/Autotrader/Validation.mqh in the
+// compiling terminal's MQL5/Include/Autotrader/ folder (not Scripts/).
 #include <Autotrader/Validation.mqh>
 
 #define P7_WINDOWS   6

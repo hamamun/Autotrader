@@ -92,13 +92,26 @@ What works right now:
 
 1. In MT5: **File → Open Data Folder**.
 2. Copy the contents of this repo's `MQL5/` folder into the terminal's `MQL5/`
-   folder (merge `Experts/` and `Include/`). Nothing else in this repo is needed
-   by MT5 — `tools/` and the docs stay here.
+   folder (merge `Experts/`, `Include/` and `Scripts/`). Keep the directory
+   structure: `MQL5/Include/Autotrader/Validation.mqh` must be present alongside
+   the other `.mqh` files, and `MQL5/Scripts/Autotrader/Phase7_Report.mq5`
+   must be under `Scripts/`. Nothing else in this repo is needed by MT5 —
+   `tools/` and the docs stay here.
 3. Open `MQL5/Experts/Autotrader/Autotrader.mq5` in **MetaEditor** and press
    **Compile** (F7). Zero errors expected.
 4. In MT5: open a chart of any symbol at **M5, M15 or M30**, drag `Autotrader`
    onto the chart, enable **Algo Trading**.
 5. **Use a demo account until Phase 7 has proven the numbers.**
+
+**If Phase7_Report says `file 'Include\\Autotrader\\Validation.mqh' not found`:**
+this header is already in the repo at `MQL5/Include/Autotrader/Validation.mqh`;
+copy it to the **same terminal data folder** used by the MetaEditor compiling
+`Phase7_Report.mq5` (MT5 → File → Open Data Folder → `MQL5/Include/Autotrader/`).
+Do not put it in `Scripts/Autotrader/` or copy just the `.mq5` script. The
+`#include <Autotrader/Validation.mqh>` line searches the terminal's `MQL5/Include`
+folder; changing slashes or the script's location won't replace the missing
+header. If several MT5 installations are open, check the data folder for the
+instance whose MetaEditor you used, then compile again.
 
 The only input is **Auto Trading** ON/OFF. Everything else self-configures.
 Turn it OFF and the EA keeps analysing and displaying directions but sends no
