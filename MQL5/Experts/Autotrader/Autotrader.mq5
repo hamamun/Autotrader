@@ -427,9 +427,22 @@ void UpdateMainPanel(void)
    else                        { sig_txt = "SIGNAL: " + GLYPH_DASH + " HOLD"; sig_clr = CLR_DIM;   }
    g_main.SetRow(3, sig_txt, sig_clr);
 
-   int conf = g_dir.Score();
-   g_main.SetRow(4, "Confidence: " + IntegerToString(conf) + "% " + GLYPH_DASH +
-                    " " + ConfLabel(conf), CLR_TEXT);
+   //--- Confidence: the published score when a side exists; while no side
+   //--- has been chosen the row shows the provisional side's evidence, so
+   //--- the scoring is always visible (owner report, 14 Oct 2026).
+   int    conf     = g_dir.Score();
+   string conf_txt = "Confidence: " + IntegerToString(conf) + "% " + GLYPH_DASH +
+                     " " + ConfLabel(conf);
+   if(g_dir.PartsProvisional())
+     {
+      int pside = g_dir.PartsSide();
+      conf_txt = "Confidence: " + IntegerToString(g_dir.PartsScore()) + "% " + GLYPH_DASH +
+                 " " + ((pside == 1) ? "BUY" : "SELL") + "-side evidence (no side yet, " +
+                 IntegerToString(g_dir.Threshold()) + " needed)";
+     }
+   else if(conf == 0 && g_dir.PartsSide() == 0)
+      conf_txt = "Confidence: 0% " + GLYPH_DASH + " no side yet";
+   g_main.SetRow(4, conf_txt, CLR_TEXT);
 
    //--- the price plan: only printed when the levels are real
    bool have_plan = (dir != AT_SIG_HOLD && g_dir.Entry() > 0.0 &&

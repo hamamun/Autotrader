@@ -103,6 +103,7 @@ Panel life-cycle of the SL (visible in LIVE TRADING panel):
 | 17 | **Still zero inputs (reaffirmed 14 Oct 2026):** Phases 3–6 added *no* user settings. Every new number (weights, thresholds, distances, lot size, news window, daily-loss limit, equity floor) is either measured from the market or derived from the symbol's own profile. `Auto Trading` ON/OFF remains the only control. |
 | 18 | **Demo until proven (14 Oct 2026):** because Phases 3–6 landed together, the EA runs on a demo account until Phase 7 (tester + walk-forward + demo forward) confirms the scoreboard. Real money only after that. |
 | 19 | **First runtime report fixed (14 Oct 2026):** attaching to some symbols printed `Autotrader (EURUSDm,M15) array out of range in 'VolumeFlow.mqh' (200,38)` — the session volume-profile walk. The low-side pointer incremented (`dn++`) instead of walking down, so whenever the top of the session range held no volume it climbed from bin to bin until it ran off the end of `double bin[24]`; which symbols died depended only on their session profile, which is why others ran normally. The same neighbour read also leaned on a range guard written *inside* a `?:`, which does not bound a fixed-size array read. Fixed: `dn--`, both neighbour reads and the order-log ticket read in `TradeEngine.mqh` moved behind plain `if`s, and `tools/volume_profile_sim.py` now reproduces the old fault and pins the new behaviour. |
+| 20 | **Scoring must always appear (14 Oct 2026, owner report):** the same symbol on three charts printed three different lines — M30 `score=46/90 parts[bias 30 …]`, M5 `score=59/93 parts[…]`, but M15 `score=0/92 parts[bias 0 struct 0 trig 0 zone 0 mom 0 vol 0 fit 0 quote 0]`. The eight zeros were **not** broken indicators: the eight evidence groups were computed only *after* a side had been chosen, and a side needs the lane's own witnesses to put it 3 votes or more ahead. With a vote inside ±2 the parts were never computed and the score was forced to 0 by design — so the line hid the very evidence the owner watches. **Fixed:** the eight parts are now ALWAYS computed. While no side has been chosen they describe the side the engine would look at first — a range extreme's fade side (the only side `RegimeAllows` permits there), otherwise the plain vote's lean — and the log labels them `PROV[BUY 54]` (or `parts[n/a - no side yet]` when even the vote is tied); the MAIN panel's Confidence row says `BUY-side evidence (no side yet, 92 needed)`. **The decision path is untouched:** the published score stays 0 (nothing can latch, no order can be sent on provisional parts), weights, gates, latch and the price plan are unchanged, and `tools/score_sim.py` now pins both facts (provisional parts never create a signal; the side is the fade side at a range extreme). |
 
 ---
 
@@ -454,7 +455,9 @@ HOLD is not a "signal") are kept in terminal global variables so they survive a
 restart. Every signal, open, cancel, failure, ladder step and close is appended
 to `MQL5\Files\Autotrader_log.csv` (rotated at 4 MB), and the Experts log gets
 one audit line per closed lane bar with the full score breakdown and the reason
-for the answer.
+for the answer. The eight parts are always printed (decision #20): while no side
+has been chosen the line marks them `PROV[BUY 54]` and they describe the side the
+engine would look at first, not a signal.
 
 ---
 

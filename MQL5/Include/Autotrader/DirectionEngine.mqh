@@ -243,6 +243,11 @@ private:
    //--- evidence parts, 0..100 each (the audit trail)
    int             m_p_bias, m_p_struct, m_p_trigger, m_p_zone;
    int             m_p_momentum, m_p_volume, m_p_fitness, m_p_quote;
+   //--- what the printed parts describe (owner report, 14 Oct 2026):
+   //--- +1/-1 = the side, 0 = nothing to show; provisional = no signal yet
+   int             m_parts_side;
+   int             m_parts_score;
+   bool            m_prov;
 
    //--- the real, reachable plan
    double          m_entry, m_sl, m_tp1, m_tp2, m_tp3;
@@ -317,6 +322,9 @@ public:
    int               PartVolume(void)     const { return m_p_volume; }
    int               PartFitness(void)    const { return m_p_fitness; }
    int               PartQuote(void)      const { return m_p_quote; }
+   int               PartsSide(void)       const { return m_parts_side; }
+   int               PartsScore(void)      const { return m_parts_score; }
+   bool              PartsProvisional(void) const { return m_prov; }
    bool              Latched(void)        const { return (m_latch_dir != 0); }
    int               LatchDir(void)       const { return m_latch_dir; }
    int               LatchAgeSec(void)    const;
@@ -343,6 +351,7 @@ CDirectionEngine::CDirectionEngine(void)
    m_tradable = false;
    m_p_bias = 0; m_p_struct = 0; m_p_trigger = 0; m_p_zone = 0;
    m_p_momentum = 0; m_p_volume = 0; m_p_fitness = 0; m_p_quote = 0;
+   m_parts_side = 0; m_parts_score = 0; m_prov = false;
    m_entry = 0.0; m_sl = 0.0; m_tp1 = 0.0; m_tp2 = 0.0; m_tp3 = 0.0;
    m_sl_dist = 0.0; m_tp_dist = 0.0; m_rr = 0.0;
    m_expected_min = 0;
@@ -453,10 +462,24 @@ string CDirectionEngine::LaneName(void) const
 //+------------------------------------------------------------------+
 string CDirectionEngine::Audit(void) const
   {
-   string s = StringFormat("AT3 %s score=%d/%d vote=%d parts[bias %d struct %d trig %d zone %d mom %d vol %d fit %d quote %d]",
-                           LaneName(), m_score, m_threshold, m_vote,
-                           m_p_bias, m_p_struct, m_p_trigger, m_p_zone,
-                           m_p_momentum, m_p_volume, m_p_fitness, m_p_quote);
+   string s = StringFormat("AT3 %s score=%d/%d vote=%d",
+                           LaneName(), m_score, m_threshold, m_vote);
+
+   //--- the parts are always shown (owner report, 14 Oct 2026). While no
+   //--- side has been chosen they describe the provisional side and are
+   //--- labelled PROV - evidence in the log, never a signal.
+   if(m_parts_side == 0)
+      s += " parts[n/a - no side yet]";
+   else
+     {
+      if(m_prov)
+         s += StringFormat(" PROV[%s %d]",
+                           (m_parts_side == 1) ? "BUY" : "SELL", m_parts_score);
+      s += StringFormat(" parts[bias %d struct %d trig %d zone %d mom %d vol %d fit %d quote %d]",
+                        m_p_bias, m_p_struct, m_p_trigger, m_p_zone,
+                        m_p_momentum, m_p_volume, m_p_fitness, m_p_quote);
+     }
+
    if(m_dir == AT_SIG_HOLD)
       s += " -> HOLD: " + m_reason;
    else
@@ -532,6 +555,7 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
       m_dir      = AT_SIG_HOLD;
       m_tradable = false;
       m_score    = 0;
+      m_parts_side = 0; m_parts_score = 0; m_prov = false;
       m_veto     = "calibrating";
       m_reason   = "collecting price history";
       m_lane_new_bar = any_new_bar;
@@ -603,11 +627,25 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
    double e_mom = 0.0, e_vol = 0.0, e_fit = 0.0, e_quote = 0.0;
    int dir = eval_dir;
 
-   if(dir != 0)
+   //--- the eight evidence parts are ALWAYS computed (owner report, 14 Oct
+   //--- 2026). When no side has been chosen yet they describe the side the
+   //--- engine would look at first - a range extreme's fade side (the only
+   //--- side RegimeAllows there), otherwise the plain vote's lean - so the
+   //--- log and the panel show real scoring instead of eight zeros.
+   int pdir = dir;
+   if(pdir == 0)
+     {
+      if(lt.regime.IsRangeExtreme())
+         pdir = (lt.regime.Kind() == AT_REGIME_RANGE_BOTTOM) ? 1 : -1;
+      else if(vote > 0) pdir = 1;
+      else if(vote < 0) pdir = -1;
+     }
+
+   if(pdir != 0)
      {
       //--- (1) M30 bias ------------------------------------------------
       int m30dir = a30.regime.Direction();
-      if(m30dir == dir)
+      if(m30dir == pdir)
         {
          e_bias = 0.75;
          if(a30.regime.IsTrend() && MathAbs(a30.regime.Score()) >= 4 &&
@@ -620,24 +658,24 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
          e_bias = a30.regime.IsRangeExtreme() ? 0.55 : 0.30;
 
       //--- (2) M15 structure + lane structure -------------------------
-      if(a15.regime.Direction() == dir)       e_struct += 0.35;
+      if(a15.regime.Direction() == pdir)       e_struct += 0.35;
       else if(a15.regime.Direction() == 0)    e_struct += 0.15;
-      if(lt.smc.structure_dir == dir)         e_struct += 0.25;
+      if(lt.smc.structure_dir == pdir)         e_struct += 0.25;
       else if(lt.smc.structure_dir == 0)      e_struct += 0.10;
-      if(lt.smc.bos_dir == dir)
+      if(lt.smc.bos_dir == pdir)
         {
          if(lt.smc.bars_since_bos <= 10)      e_struct += 0.25;
          else if(lt.smc.bars_since_bos <= 25) e_struct += 0.12;
         }
-      if(lt.smc.choch_dir == -dir && lt.smc.bars_since_choch <= 15)
+      if(lt.smc.choch_dir == -pdir && lt.smc.bars_since_choch <= 15)
          e_struct -= 0.30;
       bool stack_up = (lt.ema20 > lt.ema50 && lt.ema50 > lt.ema100);
       bool stack_dn = (lt.ema20 < lt.ema50 && lt.ema50 < lt.ema100);
-      if((dir == 1 && stack_up) || (dir == -1 && stack_dn))
+      if((pdir == 1 && stack_up) || (pdir == -1 && stack_dn))
          e_struct += 0.15;
 
       //--- (3) M5 trigger (always M5 - it is the timing timeframe) ----
-      if(dir == 1)
+      if(pdir == 1)
         {
          if(tr.lrsi > 0.50 && tr.lrsi < 0.85) e_trig += 0.30;
          else if(tr.lrsi >= 0.85)             e_trig += 0.10;
@@ -647,11 +685,11 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
          if(tr.lrsi < 0.50 && tr.lrsi > 0.15) e_trig += 0.30;
          else if(tr.lrsi <= 0.15)             e_trig += 0.10;
         }
-      if((dir == 1 && tr.close0 > tr.ss) || (dir == -1 && tr.close0 < tr.ss))
+      if((pdir == 1 && tr.close0 > tr.ss) || (pdir == -1 && tr.close0 < tr.ss))
          e_trig += 0.25;
-      if((dir == 1 && tr.decy_osc > 0.0) || (dir == -1 && tr.decy_osc < 0.0))
+      if((pdir == 1 && tr.decy_osc > 0.0) || (pdir == -1 && tr.decy_osc < 0.0))
          e_trig += 0.20;
-      bool conf_bar = (dir == 1)
+      bool conf_bar = (pdir == 1)
                       ? (tr.md.Close(0) > tr.md.Open(0) &&
                          tr.md.Close(0) > tr.md.Close(1))
                       : (tr.md.Close(0) < tr.md.Open(0) &&
@@ -660,8 +698,8 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
          e_trig += 0.25;
 
       //--- (4) zone quality (smart money, or the NW envelope) ---------
-      double zdist = (dir == 1) ? lt.smc.zone_buy_dist_atr : lt.smc.zone_sell_dist_atr;
-      int    zkind = (dir == 1) ? lt.smc.zone_buy_kind : lt.smc.zone_sell_kind;
+      double zdist = (pdir == 1) ? lt.smc.zone_buy_dist_atr : lt.smc.zone_sell_dist_atr;
+      int    zkind = (pdir == 1) ? lt.smc.zone_buy_kind : lt.smc.zone_sell_kind;
       if(zkind > 0)
         {
          if(zdist <= 0.35)      e_zone = 0.75;
@@ -671,37 +709,37 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
         }
       else
         {
-         bool near_env = (dir == 1)
+         bool near_env = (pdir == 1)
                          ? (lt.close0 <= lt.nw_lo + 0.50 * atr)
                          : (lt.close0 >= lt.nw_up - 0.50 * atr);
          e_zone = near_env ? 0.45 : 0.20;
          if(lt.vol.profile_ready && lt.vol.poc_dist_atr <= 0.60)
             e_zone += 0.15;
         }
-      if(lt.smc.sweep_bias == dir && lt.smc.bars_since_sweep <= 6)
+      if(lt.smc.sweep_bias == pdir && lt.smc.bars_since_sweep <= 6)
          e_zone += 0.20;
-      if(lt.smc.bos_dir == dir && lt.smc.bars_since_bos <= 10)
+      if(lt.smc.bos_dir == pdir && lt.smc.bars_since_bos <= 10)
          e_zone += 0.10;
 
       //--- (5) momentum agreement ------------------------------------
       int agree = 0;
-      if(ATDE_Sign(lt.nw_slope) == dir)     agree++;
-      if(ATDE_Sign(lt.kalman_slope) == dir) agree++;
-      if((dir == 1 && lt.decy_osc > 0.0) || (dir == -1 && lt.decy_osc < 0.0)) agree++;
-      if((dir == 1 && lt.close0 > lt.ss) || (dir == -1 && lt.close0 < lt.ss)) agree++;
-      if((dir == 1 && lt.lrsi > 0.55) || (dir == -1 && lt.lrsi < 0.45)) agree++;
+      if(ATDE_Sign(lt.nw_slope) == pdir)     agree++;
+      if(ATDE_Sign(lt.kalman_slope) == pdir) agree++;
+      if((pdir == 1 && lt.decy_osc > 0.0) || (pdir == -1 && lt.decy_osc < 0.0)) agree++;
+      if((pdir == 1 && lt.close0 > lt.ss) || (pdir == -1 && lt.close0 < lt.ss)) agree++;
+      if((pdir == 1 && lt.lrsi > 0.55) || (pdir == -1 && lt.lrsi < 0.45)) agree++;
       e_mom = (double)agree / 5.0 * 0.70;
       e_mom += 0.30 * MathMin(1.0, MathAbs(lt.nw_slope) / 0.15);
 
       //--- (6) volume agreement --------------------------------------
-      if(lt.vol.cvd_dir == dir)
+      if(lt.vol.cvd_dir == pdir)
          e_vol += 0.10 + 0.45 * lt.vol.cvd_strength;
       else if(lt.vol.cvd_dir == 0)
          e_vol += 0.20;
       if(lt.vol.vol_ratio >= 1.10)      e_vol += 0.25;
       else if(lt.vol.vol_ratio >= 0.90) e_vol += 0.12;
-      if((dir == 1 && lt.vol.price_vs_vwap == 1) ||
-         (dir == -1 && lt.vol.price_vs_vwap == -1))
+      if((pdir == 1 && lt.vol.price_vs_vwap == 1) ||
+         (pdir == -1 && lt.vol.price_vs_vwap == -1))
          e_vol += 0.20;
       if(lt.vol.profile_ready && lt.vol.poc_dist_atr <= 0.50)
          e_vol += 0.05;
@@ -754,6 +792,12 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
                     w6 * ATMI_Clamp01(e_fit)    + w7 * ATMI_Clamp01(e_quote);
    m_score = (dir == 0) ? 0 : (int)MathRound(blended * 100.0);
    m_eval_dir = dir;
+
+   //--- what the printed parts describe (display only - the score above
+   //--- stays 0 while no side has been chosen, so nothing can latch on it)
+   m_parts_side  = pdir;
+   m_parts_score = (pdir == 0) ? 0 : (int)MathRound(blended * 100.0);
+   m_prov        = (dir == 0 && pdir != 0);
 
    //=== 5. the real, reachable price plan ============================
    m_entry = 0.0; m_sl = 0.0; m_tp1 = 0.0; m_tp2 = 0.0; m_tp3 = 0.0;

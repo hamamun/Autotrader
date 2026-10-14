@@ -11,6 +11,9 @@ StatsKeeper.mqh and checks the outcomes we care about:
   * risk-sized lots, the 60/80/100 ladder with 50/30/20 partials and the
     volume-step / minimum-volume rounding behave on real-ish numbers
   * the owner's Win / Loss / BE rule reproduces PLAN section 1's table
+  * the provisional side shown while no side has been chosen (decision #20)
+    is the fade side at a range extreme / the vote's lean otherwise, and the
+    parts printed for it can never become a signal
 """
 import math
 
@@ -199,6 +202,61 @@ for name, deals, want in CASES:
 win, loss, be = 33, 1, 8
 print(f"\n  scoreboard Win {win} / Loss {loss} / BE {be} -> "
       f"success {100.0 * win / (win + loss):.1f}% (motto target ~98%)")
+
+# ------------------------ provisional side (owner report, 14 Oct 2026)
+# The eight evidence parts are ALWAYS computed in DirectionEngine.mqh. While
+# no side has been chosen yet they describe the "provisional" side, so the log
+# and the panel never show eight zeros. Two things must stay true:
+#   * the side shown is the one the engine would look at first - a range
+#     extreme's fade side (the only side RegimeAllows permits there), else
+#     the plain vote's lean; and
+#   * provisional parts can never become a signal: with no candidate the
+#     published score is 0 and nothing latches on the printed number.
+print("\nprovisional side when no side has been chosen (decision #20):")
+
+
+def candidate(vote):
+    return 1 if vote >= 3 else (-1 if vote <= -3 else 0)
+
+
+def prov_side(vote, kind):
+    if kind == "RANGE_BOTTOM":
+        return 1                      # fade the bottom
+    if kind == "RANGE_TOP":
+        return -1                     # fade the top
+    return 1 if vote > 0 else (-1 if vote < 0 else 0)
+
+
+PROV_CASES = [
+    # the owner's BTCUSDm M15 line: vote -1, lane regime RANGE BOTTOM
+    (-1, "RANGE_BOTTOM", 0, 1, "range bottom -> the BUY fade side"),
+    (-4, "RANGE_BOTTOM", -1, -1, "candidate exists -> parts follow it"),
+    (4, "RANGE_MIDDLE", 1, 1, "candidate exists -> parts follow it"),
+    (2, "RANGE_MIDDLE", 0, 1, "no extreme -> the vote's lean (BUY)"),
+    (-2, "TRANSITION", 0, -1, "no extreme -> the vote's lean (SELL)"),
+    (0, "RANGE_MIDDLE", 0, 0, "tied vote, plain range -> parts[n/a]"),
+]
+for vote, kind, want_cand, want_prov, why in PROV_CASES:
+    cand = candidate(vote)
+    prov = cand if cand != 0 else prov_side(vote, kind)
+    flag = "ok" if (cand == want_cand and prov == want_prov) else "WRONG"
+    print(f"  vote {vote:+d} {kind:12s} -> candidate {cand:+d}, "
+          f"parts for {prov:+d} ({why}) {flag}")
+    if cand != want_cand or prov != want_prov:
+        fails.append(f"provisional side: vote {vote} in {kind}")
+
+# the same evidence, scored for the fade side, is printed - but the decision
+# score stays 0 while the candidate is 0, so it can never clear a threshold
+PROV_EV = [0.40, 0.55, 0.30, 0.85, 0.80, 1.00, 0.15, 0.69]
+shown = score(PROV_EV, "range_ext")
+for vote in (-1, 0, 2):
+    published = 0 if candidate(vote) == 0 else score(PROV_EV, "range_ext")
+    ok = (published == 0)
+    print(f"  the M15-style parts score {shown}/92 for the fade side, but with "
+          f"vote {vote:+d} the published score is {published} "
+          f"({'ok - cannot latch' if ok else 'WRONG'})")
+    if not ok:
+        fails.append(f"provisional parts leaked into the published score at vote {vote}")
 
 print("\n" + ("ALL CHECKS PASSED" if not fails else f"FAILURES: {fails}"))
 raise SystemExit(1 if fails else 0)
