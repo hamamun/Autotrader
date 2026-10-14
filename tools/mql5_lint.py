@@ -72,6 +72,17 @@ for rel in FILES:
     raw[rel] = src
     clean[rel] = strip(src)
 
+# ---- 0. EA preamble ---------------------------------------------------
+# The EA starts with a comment banner, followed by #property directives.
+# Stray un-commented text before the first directive is parsed as MQL code
+# and can make every subsequent class declaration fail with cascading errors.
+ea_source = raw[FILES[-1]]
+property_at = ea_source.find('#property')
+if property_at < 0:
+    problems.append(f"{FILES[-1]}: missing #property directives")
+elif strip(ea_source[:property_at]).strip():
+    problems.append(f"{FILES[-1]}: unexpected code before the first #property directive")
+
 # ---- 1. balance -------------------------------------------------------
 pairs = {')': '(', '}': '{', ']': '['}
 for rel in FILES:

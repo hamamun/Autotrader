@@ -1,4 +1,5 @@
-ime exit, restart restore.        |
+//+------------------------------------------------------------------+
+//| Time exit, restart restore.                                      |
 //| Phase 5: Safety layer - permissions, stale quotes, spread, news,  |
 //|          gap shock, daily loss stand-down, equity floor.          |
 //| Phase 6: Auto-execution + the owner's Win/Loss/BE scoreboard and  |
