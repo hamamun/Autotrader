@@ -1,17 +1,18 @@
 # Autotrader
 
-Fully automatic MT5 trading EA — pure MQL5. No Python, no training, no waiting.
+MT5 trading EA — pure MQL5, with one owner-facing input: Auto Trading ON/OFF.
 
-**Motto:** out of every 100 directions (BUY/SELL/HOLD) the EA gives, ~98 should
-end as successful trades (TP hit), with real, reachable entry and TP levels.
+**Research target, not a result:** the project aims for a high rate of successful
+trades, but the 98% motto is unverified. Code review and synthetic checks do not
+establish profitability or real-money readiness.
 
 ## Current status
 
-**Phases 1–6 built.** The EA now decides and trades by itself: it reads three
-timeframes at once, judges the evidence, says HOLD most of the time, and when it
-does speak it opens a real order with a real stop and walks it through the
-60/80/100 TP ladder. What is left is **Phase 7 — proving the 98%**, so until
-then it belongs on a **demo account**.
+**Core phases 1–6 are implemented; the two-sided display, audit, and pending-order
+freshness improvements are applied in code but still need native MT5 validation.** The EA reads three timeframes and may
+place orders when Auto Trading is enabled. Strategy Tester, walk-forward, and
+demo-forward validation have not established its performance; keep it on demo
+until those checks are completed and reviewed.
 
 > The one input is still **Auto Trading** ON/OFF. Phases 3–6 added **no** new
 > settings — every number is measured from the market or derived from the
@@ -20,11 +21,10 @@ then it belongs on a **demo account**.
 What works right now:
 
 - **MAIN panel** — exact look/rows of the reference: title, Bid/Ask/Spread,
-  Regime, SIGNAL (BUY/SELL/HOLD with arrows + colors), Confidence % + label
-  (and the threshold it must beat; while no side has been chosen yet the row
-  shows the provisional side's evidence, marked, instead of a bare 0%),
-  Entry / Stop Loss / Take Profit with USD
-  estimates and points, Risk:Reward, Session | Expected Duration, STATUS,
+  Regime, a latched SIGNAL or a clearly-labelled BUY/SELL BIAS (not a trade
+  signal), two-sided evidence scores and a qualitative tier, Entry / Stop Loss /
+  Take Profit with USD estimates and points,
+  Risk:Reward, Session | Expected Duration, STATUS,
   Today / All Time counters.
 - **Direction engine (Phase 3, live).** The SIGNAL row is real. The engine
   always reads **M30 (bias) → M15 (setup) → M5 (trigger)** whatever chart it
@@ -37,11 +37,16 @@ What works right now:
   liquidity sweeps, zones), volume flow (CVD-style delta, participation ratio,
   session volume profile POC/VAH/VAL, session + rolling VWAP), plus Wilder ATR
   and the EMA stack. All hand-written MQL5.
-- **Eight evidence groups**, each weighted by the current regime, blended into
-  the Confidence % — M30 bias, structure, M5 trigger, zone quality, momentum,
-  volume, volatility fitness, quote quality. It speaks only at or above the
-  symbol's own auto-set threshold (~85 calm forex → ~90+ crypto) and says HOLD
-  the rest of the time. Signals are **latched** (hysteresis) so nothing flickers.
+- **Two-sided direction engine.** BUY and SELL are each scored from the same
+  eight regime-weighted evidence groups; opposing M30, structure, momentum,
+  trigger, zone, and volume evidence therefore weighs against that side. A
+  visible bias can be labelled weak / developing / moderate / strong / very
+  strong even while execution is waiting or blocked. These are uncalibrated
+  evidence indices, not probabilities. A bias is never an auto-trade signal;
+  execution still requires the configured score threshold, regime and quote
+  gates, a valid price plan,
+  safety permission, and risk checks. The existing hard execution safeguards
+  remain in place, and signals stay latched to avoid flicker.
 - **Hard gates**: M5/M15 may never fight M30; VOLATILE / QUIET / TRANSITION /
   range-middle stand aside; a trend is only continued, a range is only faded at
   its TOP/BOTTOM; the stop must not be absurd, risk:reward must not be thin, the
@@ -72,13 +77,19 @@ What works right now:
   re-attach, every open trade is rebuilt from the broker's own data plus two
   terminal global variables per ticket; if those are gone the ladder state is
   inferred from the remaining volume and whether the stop already sits at Entry.
-- **Scoreboard + audit trail (Phase 6, live).** Today / All Time
-  `Num of Signal, Win, Loss, BE` come from the broker's deal history with closing
-  deals grouped per position, so one trade = one result and the owner's rule
-  applies exactly (positive = Win, negative = Loss, zero = BE). Every signal,
-  open, cancel, failure and close is appended to `MQL5\Files\Autotrader_log.csv`,
-  and the Experts log gets one audit line per closed bar with the full score
-  breakdown and the reason for the answer.
+- **Scoreboard + decision audit.** The CSV now records a two-sided assessment
+  per closed lane bar (BUY/SELL scores, gap, evidence breakdown, spread, plan
+  levels, and trade-eligibility reason), then records latched signals and
+  eventual outcomes by position ID. Closed-trade net includes opening and
+  closing commission, swap, and fees; gross P/L and each cost component are
+  preserved for review. The existing Win/Loss/BE display still groups deals by
+  position so partial closes count as one trade. Start Phase 7 runs with a fresh
+  log file; do not append older-build logs to the corrected 16-column schema.
+- **Pending-order freshness.** Pending entries are rechecked against current
+  signal qualification, Auto Trading, and safety permission, and expire after
+  at most three chart bars (bounded by expected duration, with a 10-minute
+  minimum). The same expiry is sent to brokers that support specified expiry;
+  local cancellation covers GTC-only symbols.
 - **Symbol Intelligence + Regime engine (Phase 2, live)** — unchanged and now
   feeding real decisions: attach to any symbol and the EA studies it and sets its
   own hidden dials; the Regime row stays specific
@@ -123,22 +134,22 @@ orders.
 
 For the first moments on a symbol with little downloaded history the STATUS row
 says `Calibrating — studying this symbol, collecting price history`; the engine
-needs 120 closed bars on each of M30, M15 and M5 before it will speak. After
-that, STATUS always tells the truth: `Watching — HOLD (M5/M15 would fight the
-M30 bias)`, `Watching — HOLD (score 78 below the 90 needed)`,
-`Signal armed — latched, score 92 vs 90 needed`, `Waiting — entry order placed
-at the zone edge`, `Trading — position open, managing the ladder`,
-`Frozen — news freeze — USD news`, `Stand-down — daily loss limit reached`.
+needs 120 closed bars on each of M30, M15 and M5 before it can assess direction.
 
-When the market gives no side at all (the lane's own witnesses are within ±2 of
-a tie) the CONFIDENCE row and the Experts-log line still show the scoring,
-marked: `Confidence: 54% — BUY-side evidence (no side yet, 92 needed)` and
-`score=0/92 vote=-1 PROV[BUY 54] parts[bias 40 …]`. Those numbers describe the
-side the engine would look at first — the candidate under evaluation, else a
-range extreme's fade side, else the vote's lean (and when the vote is a perfect
-tie, the graded lean of the same witnesses) — and are **evidence on screen,
-never a signal**: the SIGNAL stays HOLD, the published score stays 0 and nothing
-can latch on them.
+When there is a directional lead but no executable signal, row 3 shows `BIAS:
+BUY/SELL (not a trade signal)`. The evidence row shows both sides and the lead,
+for example `BUY 62 / SELL 47 | BUY leads by 15 (moderate; score is not
+probability; trade threshold 88)`. If the scores are too close, it shows
+`DIRECTION: MIXED / WAIT` and keeps both scores visible. Any displayed indicative
+entry/stop/target plan is not an order. STATUS separately explains whether the
+EA is waiting for score, blocked by a market gate, frozen by safety, or has a
+qualified signal. The evidence tiers have not been calibrated against outcomes.
+
+A real latched `SIGNAL: BUY/SELL` is still distinct from a display bias. It may
+only trade if the analytical execution gates and the separate safety/risk checks
+all pass. A pending limit is cancelled if the signal, Auto Trading permission,
+or safety permission is no longer valid, and otherwise has a bounded freshness
+window.
 
 ## Roadmap (see PLAN.md for the full design)
 
@@ -146,11 +157,11 @@ can latch on them.
 |-------|-------------|--------|
 | 1 | Panels (MAIN + LIVE TRADING), drag, auto-size | **built** |
 | 2 | Symbol Intelligence + Regime engine | **built** |
-| 3 | Direction engine (M30→M15→M5) + confidence % | **built** |
+| 3 | Two-sided direction engine (M30→M15→M5) + uncalibrated evidence tiers | **implemented; requires MT5 validation** |
 | 4 | Trade engine: entries, SL logic, TP ladder, break-even | **built** |
 | 5 | Safety layer (news, spread, daily loss, restart-restore) | **built** |
-| 6 | Auto-execution + Win/Loss/BE logging + counters | **built** |
-| 7 | Full validation toward the 98% motto: tester, walk-forward, PBO/Deflated Sharpe, permutation test, demo forward (pure MQL5, see PLAN 6C) | **built — owner runs the tests and the demo** |
+| 6 | Auto-execution + Win/Loss/BE logging + counters | **implemented; pending freshness and audit extended** |
+| 7 | Tester, walk-forward, PBO/Deflated Sharpe, permutation test, demo forward (pure MQL5, see PLAN 6C) | **not yet validated; must be run and reviewed** |
 | 8 | Trailing stop | later |
 
 Win/Loss rule (owner's): closed at any positive value = **Win**,
@@ -170,14 +181,10 @@ writing the MQL5; they live in `tools/` and are never copied into MT5:
   argument handed to `OrderGetDouble` / `PositionGetDouble` / `HistoryDealGet*`
   / `AccountInfo*`, and the `TRADE_RETCODE_*` family — the three mistakes that
   compile reported.
-- `python3 tools/score_sim.py` — re-states the decision and money arithmetic and
-  asserts the weights sum to 1.00, that random noise never clears the threshold
-  (HOLD really is the default), that all 15 regime/direction gates behave as
-  designed, that risk sizing never overshoots the dial, that the 50/30/20 ladder
-  always closes exactly the opening volume after volume-step rounding, that the
-  owner's Win/Loss/BE rule reproduces PLAN §1's four worked cases, and that the
-  provisional parts shown while no side has been chosen (decision #20) describe
-  the right side yet can never become a signal.
+- `python3 tools/score_sim.py` — mirrors the weights, two-sided bias selection,
+  evidence tiers, independent trade threshold, hard regime gates, risk sizing,
+  TP ladder, pending-order lifetime, and full deal-cost aggregation. These are
+  arithmetic/static checks only, not backtest or profitability evidence.
 - `python3 tools/volume_profile_sim.py` — re-states the session volume-profile
   walk of `VolumeFlow.mqh` (from the POC, grow outward until 70% of the volume
   is inside) and runs it over 20,000 synthetic sessions plus the spike shapes

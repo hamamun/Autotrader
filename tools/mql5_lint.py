@@ -7,10 +7,11 @@ up as compile errors for the owner:
 
   1. unbalanced (), {}, [] (comments and string literals stripped first)
   2. duplicate global function / #define names across headers
-  3. every method declared in a class has a definition (or is inline)
+  3. every method declared in a class has a matching definition signature (or is inline)
   4. every method the EA calls on our own objects actually exists
   5. include guards present, unique, and matching the file name
   6. known-bad MQL5 API calls (functions that do not exist in MQL5)
+  7. audit CSV rows keep the 16-column contract consumed by Phase 7
 """
 import re, sys, os, collections
 
@@ -152,6 +153,21 @@ for name, where in defines.items():
     if len(where) > 1:
         problems.append(f"duplicate #define {name} in {sorted(set(where))}")
 
+def normalize_parameters(params):
+    """Normalize a simple MQL parameter list, discarding parameter names."""
+    if not params.strip() or params.strip() == "void":
+        return ()
+    normalized = []
+    for param in params.split(','):
+        param = re.sub(r'=.*$', '', param).strip()
+        # MQL method parameters in this project are simple types plus a name.
+        param = re.sub(r'\b[A-Za-z_]\w*\s*(?:\[\s*\])?\s*$', '', param).strip()
+        param = re.sub(r'\s*([*&])\s*', r'\1', param)
+        param = re.sub(r'\s+', ' ', param).strip()
+        normalized.append(param)
+    return tuple(normalized)
+
+
 # ---- 3. declared class methods must be defined or inline --------------
 for rel in FILES:
     body = clean[rel]
@@ -173,13 +189,23 @@ for rel in FILES:
                    'MathMin', 'MathAbs', 'StringFormat', 'TimeToString',
                    'ShortToString', 'StringLen', 'TimeCurrent', 'return'}
         declared = set()
-        for m in re.finditer(r'\b([A-Za-z_]\w*)\s*\([^;{)]*\)\s*(?:const\s*)?;', cbody):
-            if m.group(1) not in KEYWORDS | BUILTIN:
-                declared.add(m.group(1))
+        declared_signatures = collections.defaultdict(set)
+        for m in re.finditer(r'\b([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*(const\s*)?;', cbody):
+            name = m.group(1)
+            if name not in KEYWORDS | BUILTIN:
+                declared.add(name)
+                declared_signatures[name].add(
+                    (normalize_parameters(m.group(2)), bool(m.group(3))))
         inline = set(m.group(1) for m in
                      re.finditer(r'\b([A-Za-z_]\w*)\s*\([^;{)]*\)\s*(?:const\s*)?\{', cbody))
         defined = set(m.group(1) for m in
                       re.finditer(re.escape(cname) + r'::([A-Za-z_]\w*)\s*\(', body))
+        for m in re.finditer(re.escape(cname) +
+                             r'::([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(const\s*)?\{', body):
+            name = m.group(1)
+            signature = (normalize_parameters(m.group(2)), bool(m.group(3)))
+            if name in declared_signatures and signature not in declared_signatures[name]:
+                problems.append(f"{rel}: {cname}::{name} definition signature does not match its declaration")
         missing = declared - inline - defined
         if missing:
             problems.append(f"{rel}: class {cname} declares but never defines "
@@ -458,6 +484,30 @@ for rel in FILES:
     for tok in set(re.findall(r'\bTRADE_RETCODE_\w+', clean[rel])):
         if tok not in RETCODES:
             problems.append(f"{rel}: {tok} is not a trade server retcode")
+
+# ---- 10. audit CSV rows keep the Phase 7 16-column schema ------------
+def call_arg_counts(src, name):
+    counts = []
+    for m in re.finditer(r'\b' + re.escape(name) + r'\s*\(', src):
+        depth, commas = 1, 0
+        for ch in src[m.end():]:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    counts.append(commas + 1)
+                    break
+            elif ch == ',' and depth == 1:
+                commas += 1
+    return counts
+
+stats_rel = "MQL5/Include/Autotrader/StatsKeeper.mqh"
+for row_no, count in enumerate(call_arg_counts(clean[stats_rel], "FileWrite"), 1):
+    columns = count - 1  # FileWrite's first argument is the file handle.
+    if columns != 16:
+        problems.append(f"{stats_rel}: FileWrite row {row_no} has {columns} columns; "
+                        "Phase 7 requires exactly 16")
 
 # ---- report -----------------------------------------------------------
 lines = sum(len(raw[f].splitlines()) for f in FILES)

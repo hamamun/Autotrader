@@ -66,7 +66,7 @@ struct SATSymbolProfile
    //---  in Phase 2 they also scale the preview Entry/SL/TP numbers.)
    double               sl_mult;            // stop distance  = sl_mult x ATR
    double               tp_mult;            // target distance = tp_mult x ATR
-   int                  confidence_threshold; // proof needed before speaking
+   int                  score_threshold;      // minimum evidence score to qualify
    double               spread_limit_pts;   // "spread too expensive" line
    double               risk_pct;           // baseline risk dial (Phase 4+)
   };
@@ -180,7 +180,7 @@ public:
    double            SpreadTypicalPts(void)   const { return m_profile.spread_typical_pts; }
    double            SlMult(void)             const { return m_profile.sl_mult; }
    double            TpMult(void)             const { return m_profile.tp_mult; }
-   int               ConfidenceThreshold(void) const { return m_profile.confidence_threshold; }
+   int               ScoreThreshold(void) const { return m_profile.score_threshold; }
    //--- Phase 3+ getters: the direction, trade and safety engines read
    //--- the rest of the measured profile through these.
    string            Symbol(void)             const { return m_profile.symbol; }
@@ -249,7 +249,7 @@ CSymbolIntelligence::CSymbolIntelligence(void)
    m_profile.updated = 0;
    m_profile.sl_mult = 0.0;
    m_profile.tp_mult = 0.0;
-   m_profile.confidence_threshold = 0;
+   m_profile.score_threshold = 0;
    m_profile.spread_limit_pts = 0.0;
    m_profile.risk_pct = 0.0;
    m_spread_sum = 0.0;
@@ -267,28 +267,28 @@ void CSymbolIntelligence::DeriveDials(void)
   {
    //--- calm baseline per family
    double sl = 1.6, tp = 3.5;
-   int    conf = 85;
+   int    threshold = 85;
    switch(m_profile.symbol_class)
      {
-      case AT_CLASS_FOREX:  sl = 1.6; tp = 3.5; conf = 85; break;
-      case AT_CLASS_METAL:  sl = 1.8; tp = 3.8; conf = 87; break;
-      case AT_CLASS_CRYPTO: sl = 2.0; tp = 4.2; conf = 90; break;
-      case AT_CLASS_INDEX:  sl = 1.8; tp = 3.8; conf = 87; break;
-      case AT_CLASS_ENERGY: sl = 1.9; tp = 4.0; conf = 88; break;
-      default:              sl = 1.8; tp = 3.8; conf = 88; break;
+      case AT_CLASS_FOREX:  sl = 1.6; tp = 3.5; threshold = 85; break;
+      case AT_CLASS_METAL:  sl = 1.8; tp = 3.8; threshold = 87; break;
+      case AT_CLASS_CRYPTO: sl = 2.0; tp = 4.2; threshold = 90; break;
+      case AT_CLASS_INDEX:  sl = 1.8; tp = 3.8; threshold = 87; break;
+      case AT_CLASS_ENERGY: sl = 1.9; tp = 4.0; threshold = 88; break;
+      default:              sl = 1.8; tp = 3.8; threshold = 88; break;
      }
 
    //--- adjust to how jumpy the symbol is RIGHT NOW vs its own normal
    double r = m_profile.atr_ratio;
-   if(r >= 1.5)       { sl += 0.3; conf += 3; }   // wild now: room + proof
-   else if(r >= 1.25) { sl += 0.15; conf += 2; }
-   else if(r <= 0.7)  { sl -= 0.2; conf += 2; }   // sleepy: moves must prove themselves
-   if(m_profile.atr_pct >= 1.0)                   // very large daily wiggle
-      conf += 2;
+   if(r >= 1.5)       { sl += 0.3; threshold += 3; } // wild now: more room + a higher score
+   else if(r >= 1.25) { sl += 0.15; threshold += 2; }
+   else if(r <= 0.7)  { sl -= 0.2; threshold += 2; } // sleepy: stronger directional evidence
+   if(m_profile.atr_pct >= 1.0)                     // very large daily wiggle
+      threshold += 2;
 
    m_profile.sl_mult = MathMax(1.2, MathMin(2.6, sl));
    m_profile.tp_mult = MathMax(m_profile.sl_mult * 1.8, MathMin(5.0, tp));
-   m_profile.confidence_threshold = (int)MathMax(80, MathMin(95, conf));
+   m_profile.score_threshold = (int)MathMax(80, MathMin(95, threshold));
    m_profile.spread_limit_pts = (m_profile.spread_typical_pts > 0.0)
                                 ? m_profile.spread_typical_pts * 2.5
                                 : (double)m_profile.spread_now_pts * 2.5;

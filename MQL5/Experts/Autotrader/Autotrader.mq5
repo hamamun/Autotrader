@@ -32,7 +32,7 @@ CInfoPanel          g_main;      // MAIN panel (signal view)
 CInfoPanel          g_live;      // LIVE TRADING panel (real open order)
 //--- brains
 CSymbolIntelligence g_symbol;    // symbol profile + adaptive dials
-CDirectionEngine    g_dir;       // the judge: BUY / SELL / HOLD + confidence
+CDirectionEngine    g_dir;       // the judge: two-sided evidence + qualified signal
 CSafetyManager      g_safety;    // freeze conditions
 CStatsKeeper        g_stats;     // Win/Loss/BE scoreboard + CSV audit
 CTradeEngine        g_trade;     // entries, ladder, break-even, restore
@@ -46,7 +46,8 @@ datetime g_last_profile   = 0;      // throttle: symbol profile (5s)
 datetime g_last_latch     = 0;      // latch time we already counted
 datetime g_last_fail      = 0;      // order-failure cooldown
 datetime g_last_audit_bar = 0;      // audit line printed once per lane bar
-bool     g_had_trade      = false;  // to notice a trade finishing
+bool     g_had_trade      = false;  // to notice an active position/order ending
+bool     g_had_position   = false;  // distinguish a closed trade from an unfilled pending order
 bool     g_live_shown     = false;  // LIVE panel visibility, cached
 datetime g_last_gap_bar   = 0;      // gap check runs once per lane bar
 double   g_disp_lots      = 0.0;    // cached display lot size
@@ -84,13 +85,9 @@ double EstUsd(const double price_diff, const double lots)
    return price_diff / tick_size * tick_value * lots;
   }
 
-string ConfLabel(const int conf)
+string ConfLabel(const int score)
   {
-   if(conf >= 90) return "Prime";
-   if(conf >= 75) return "Strong";
-   if(conf >= 60) return "Confident";
-   if(conf >= 40) return "Neutral";
-   return "Weak";
+   return ATDE_EvidenceTier(score);
   }
 
 string TFName(void)
@@ -218,6 +215,7 @@ void TryOpenTrade(void)
       g_dir.MarkTraded();
       g_trade.SetExpectedDefault(eta);
       g_had_trade = true;
+      g_had_position = g_trade.HasPosition();
       g_stats.Log("OPEN", g_dir.Audit());
      }
    else
@@ -262,18 +260,28 @@ void RunBrains(const bool force)
      {
       g_last_latch = ltch;
       g_stats.OnSignal(dir, g_dir.Score(), g_dir.Threshold(),
-                       g_dir.RegimeDisplay(), g_dir.Audit());
+                       g_dir.RegimeDisplay(), g_dir.Entry(), g_dir.Sl(),
+                       g_dir.Tp1(), g_dir.Tp2(), g_dir.Tp3(), g_dir.Audit());
       Print("Autotrader: NEW SIGNAL - ", g_dir.Audit());
      }
    else if(dir == AT_SIG_HOLD && g_last_latch != 0)
-     {
-      //--- the signal was released: pull any waiting entry order back
       g_last_latch = 0;
-      if(g_trade.HasPending())
-        {
-         g_trade.CancelPending();
-         g_stats.Log("CANCEL", "signal released - pending entry cancelled");
-        }
+
+   //--- Revalidate every pending entry on each brain pass. An order must
+   //--- still have a qualified signal, auto-trading permission and all
+   //--- current safety checks; otherwise cancel it before it can fill stale.
+   if(g_trade.HasPending())
+     {
+      string cancel_why = "";
+      if(!InpAutoTrading)
+         cancel_why = "Auto Trading OFF - pending entry cancelled";
+      else if(!g_safety.CanOpen())
+         cancel_why = "safety block - pending entry cancelled: " + g_safety.Block();
+      else if(dir == AT_SIG_HOLD || !g_dir.Tradable())
+         cancel_why = "signal no longer execution-qualified - pending entry cancelled: " +
+                      g_dir.Reason();
+      if(cancel_why != "" && g_trade.CancelPending(cancel_why))
+         g_stats.Log("CANCEL", cancel_why);
      }
 
    //--- Phase 6: auto-execution (only when everything agrees)
@@ -286,21 +294,42 @@ void RunBrains(const bool force)
   }
 
 //+------------------------------------------------------------------+
+//| manage positions and record locally expired pending orders        |
+//+------------------------------------------------------------------+
+void ManageTrades(void)
+  {
+   if(g_trade.Manage())
+      g_stats.Log("EXPIRE", g_trade.LastPendingEvent());
+  }
+
+//+------------------------------------------------------------------+
 //| notice a trade finishing: the latch is free again                 |
 //+------------------------------------------------------------------+
 void CheckTradeFinished(void)
   {
+   bool has_position = g_trade.HasPosition();
    bool has = g_trade.HasAny();
    if(g_had_trade && !has)
      {
+      bool position_closed = g_had_position;
       g_had_trade = false;
+      g_had_position = false;
       g_dir.ClearLatch();
       g_last_latch = 0;
-      g_stats.Scan(true);
-      g_stats.Log("CLOSED", "trade finished - scoreboard updated");
+      if(position_closed)
+        {
+         g_stats.Scan(true);
+         g_stats.Log("CLOSED", "position finished - scoreboard updated");
+        }
+      else
+         g_stats.Log("PENDING END", "pending entry removed or expired; no position opened");
      }
    else if(has)
+     {
       g_had_trade = true;
+      if(has_position)
+         g_had_position = true;
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -330,6 +359,18 @@ void AuditOnNewBar(void)
          " | regime M30: ", g_dir.a30.regime.Display(),
          " | M15: ", g_dir.a15.regime.Display(),
          " | M5: ", g_dir.a5.regime.Display());
+   bool can_submit = (InpAutoTrading && g_dir.Dir() != AT_SIG_HOLD &&
+                      g_dir.Tradable() && !g_dir.LatchTraded() &&
+                      !g_trade.HasAny() && g_safety.CanOpen() &&
+                      (g_last_fail == 0 || TimeCurrent() - g_last_fail >= 30));
+   string assessment = g_dir.Audit() + " | auto=" +
+                       (InpAutoTrading ? "on" : "off") + " | safety=" +
+                       (g_safety.CanOpen() ? "ok" : g_safety.Block());
+   g_stats.OnAssessment(g_dir.BiasDir(), g_dir.BuyScore(), g_dir.SellScore(),
+                        g_dir.Threshold(), g_dir.RegimeDisplay(),
+                        g_dir.Entry(), g_dir.Sl(), g_dir.Tp1(), g_dir.Tp2(),
+                        g_dir.Tp3(), SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
+                        can_submit, assessment);
   }
 
 //+------------------------------------------------------------------+
@@ -346,13 +387,19 @@ string StatusText(color &clr)
       return "STATUS: Trading - position open, managing the ladder";
 
    if(g_trade.HasPending())
-      return "STATUS: Waiting - entry order placed at the zone edge";
+      return "STATUS: Waiting - fresh pending entry at the zone edge";
+
+   string bias_note = "mixed BUY/SELL evidence";
+   if(g_dir.BiasDir() == 1)
+      bias_note = "BUY bias (" + g_dir.BiasTier() + " evidence; not a trade signal)";
+   else if(g_dir.BiasDir() == -1)
+      bias_note = "SELL bias (" + g_dir.BiasTier() + " evidence; not a trade signal)";
 
    if(!InpAutoTrading)
      {
       if(g_dir.Dir() == AT_SIG_HOLD)
-         return "STATUS: Auto Trading OFF - watching, HOLD (" + g_dir.Reason() + ")";
-      return "STATUS: Auto Trading OFF - signal displayed only, no orders sent";
+         return "STATUS: Auto Trading OFF - " + bias_note + "; waiting: " + g_dir.Reason();
+      return "STATUS: Auto Trading OFF - qualified signal displayed only, no orders sent";
      }
 
    if(!g_safety.CanOpen())
@@ -362,7 +409,7 @@ string StatusText(color &clr)
      }
 
    if(g_dir.Dir() == AT_SIG_HOLD)
-      return "STATUS: Watching - HOLD (" + g_dir.Reason() + ")";
+      return "STATUS: Watching - " + bias_note + "; waiting: " + g_dir.Reason();
 
    if(!g_dir.LatchTraded() && g_last_fail > 0 &&
       TimeCurrent() - g_last_fail < 300)
@@ -395,7 +442,7 @@ void UpdateMainPanel(void)
       g_main.SetRow(1,  "Bid: " + dashes + " | Ask: " + dashes + " | Spread: " + dashes, CLR_TEXT);
       g_main.SetRow(2,  "Regime: " + dashes, CLR_TEXT);
       g_main.SetRow(3,  "SIGNAL: " + dashes, CLR_DIM);
-      g_main.SetRow(4,  "Confidence: " + dashes, CLR_TEXT);
+      g_main.SetRow(4,  "Evidence: " + dashes, CLR_TEXT);
       g_main.SetRow(5,  "Entry: " + dashes, CLR_TEXT);
       g_main.SetRow(6,  "Stop Loss: " + dashes, CLR_TEXT);
       g_main.SetRow(7,  "Take Profit: " + dashes, CLR_TEXT);
@@ -418,35 +465,49 @@ void UpdateMainPanel(void)
    //--- regime: real and specific (Phase 2), for THIS chart's lane
    g_main.SetRow(2, "Regime: " + g_dir.RegimeDisplay(), CLR_TEXT);
 
-   //--- signal + confidence: REAL since Phase 3
+   //--- Separate the displayed directional bias from a latched trade signal.
    int    dir = g_dir.Dir();
    string sig_txt;
    color  sig_clr;
-   if(dir == AT_SIG_BUY)       { sig_txt = "SIGNAL: " + GLYPH_UP + " BUY";    sig_clr = CLR_GREEN; }
-   else if(dir == AT_SIG_SELL) { sig_txt = "SIGNAL: " + GLYPH_DOWN + " SELL"; sig_clr = CLR_RED;   }
-   else                        { sig_txt = "SIGNAL: " + GLYPH_DASH + " HOLD"; sig_clr = CLR_DIM;   }
+   if(dir == AT_SIG_BUY)
+     { sig_txt = "SIGNAL: " + GLYPH_UP + " BUY"; sig_clr = CLR_GREEN; }
+   else if(dir == AT_SIG_SELL)
+     { sig_txt = "SIGNAL: " + GLYPH_DOWN + " SELL"; sig_clr = CLR_RED; }
+   else if(g_dir.BiasDir() == 1)
+     { sig_txt = "BIAS: " + GLYPH_UP + " BUY (not a trade signal)"; sig_clr = CLR_ORANGE; }
+   else if(g_dir.BiasDir() == -1)
+     { sig_txt = "BIAS: " + GLYPH_DOWN + " SELL (not a trade signal)"; sig_clr = CLR_ORANGE; }
+   else
+     { sig_txt = "DIRECTION: MIXED / WAIT"; sig_clr = CLR_DIM; }
    g_main.SetRow(3, sig_txt, sig_clr);
 
-   //--- Confidence: the published score when a side exists; while no side
-   //--- has been chosen the row shows the provisional side's evidence, so
-   //--- the scoring is always visible (owner report, 14 Oct 2026).
-   int    conf     = g_dir.Score();
-   string conf_txt = "Confidence: " + IntegerToString(conf) + "% " + GLYPH_DASH +
-                     " " + ConfLabel(conf);
-   if(g_dir.PartsProvisional())
-     {
-      int pside = g_dir.PartsSide();
-      conf_txt = "Confidence: " + IntegerToString(g_dir.PartsScore()) + "% " + GLYPH_DASH +
-                 " " + ((pside == 1) ? "BUY" : "SELL") + "-side evidence (no side yet, " +
-                 IntegerToString(g_dir.Threshold()) + " needed)";
-     }
-   else if(conf == 0 && g_dir.PartsSide() == 0)
-      conf_txt = "Confidence: 0% " + GLYPH_DASH + " no side yet";
+   //--- The two side-scores show contrary evidence. They are evidence indices,
+   //--- not calibrated probabilities; execution still needs the separate gate.
+   int gap = (int)MathAbs(g_dir.BiasGap());
+   string lead = (g_dir.BiasDir() == 1) ? "BUY leads by " :
+                 ((g_dir.BiasDir() == -1) ? "SELL leads by " : "mixed, gap ");
+   string conf_txt;
+   if(dir != AT_SIG_HOLD)
+      conf_txt = "Evidence: BUY " + IntegerToString(g_dir.BuyScore()) +
+                 " / SELL " + IntegerToString(g_dir.SellScore()) +
+                 " | signal score " + IntegerToString(g_dir.Score()) + "/" +
+                 IntegerToString(g_dir.Threshold()) + " (" + ConfLabel(g_dir.Score()) +
+                 "; score is not probability)";
+   else if(g_dir.BiasDir() != 0)
+      conf_txt = "Evidence: BUY " + IntegerToString(g_dir.BuyScore()) +
+                 " / SELL " + IntegerToString(g_dir.SellScore()) + " | " + lead +
+                 IntegerToString(gap) + " (" + g_dir.BiasTier() +
+                 "; score is not probability; trade threshold " +
+                 IntegerToString(g_dir.Threshold()) + ")";
+   else
+      conf_txt = "Evidence mixed: BUY " + IntegerToString(g_dir.BuyScore()) +
+                 " / SELL " + IntegerToString(g_dir.SellScore()) + " | gap " +
+                 IntegerToString(gap) + " (no clear bias; scores are not probabilities)";
    g_main.SetRow(4, conf_txt, CLR_TEXT);
 
    //--- the price plan: only printed when the levels are real
-   bool have_plan = (dir != AT_SIG_HOLD && g_dir.Entry() > 0.0 &&
-                     g_dir.Sl() > 0.0 && g_dir.Tp3() > 0.0);
+   bool have_plan = (g_dir.Entry() > 0.0 && g_dir.Sl() > 0.0 && g_dir.Tp3() > 0.0 &&
+                     (dir != AT_SIG_HOLD || g_dir.BiasDir() != 0));
    if(!have_plan)
      {
       g_main.SetRow(5, "Entry: " + GLYPH_DASH, CLR_TEXT);
@@ -463,18 +524,22 @@ void UpdateMainPanel(void)
 
       double gap     = entry - bid;
       double gap_usd = EstUsd(gap, lots);
-      g_main.SetRow(5, "Entry: " + FmtPrice(entry) + " / gap est. " +
+      string plan_tag = (dir == AT_SIG_HOLD) ? "Indicative entry: " : "Entry: ";
+      g_main.SetRow(5, plan_tag + FmtPrice(entry) + " / gap est. " +
                        FmtUsd(gap_usd) + " (" + FmtPts(gap) + " away)", CLR_TEXT);
 
       double sl_diff = sl - entry;
-      g_main.SetRow(6, "Stop Loss: " + FmtPrice(sl) + " / est. " +
+      string sl_tag = (dir == AT_SIG_HOLD) ? "Indicative Stop Loss: " : "Stop Loss: ";
+      g_main.SetRow(6, sl_tag + FmtPrice(sl) + " / est. " +
                        FmtUsd(EstUsd(sl_diff, lots)) + " (" + FmtPts(sl_diff) + ")", CLR_TEXT);
 
       double tp_diff = tp3 - entry;
-      g_main.SetRow(7, "Take Profit: " + FmtPrice(tp3) + " / est. " +
+      string tp_tag = (dir == AT_SIG_HOLD) ? "Indicative Take Profit: " : "Take Profit: ";
+      g_main.SetRow(7, tp_tag + FmtPrice(tp3) + " / est. " +
                        FmtUsd(EstUsd(tp_diff, lots)) + " (" + FmtPts(tp_diff) + ")", CLR_TEXT);
 
-      g_main.SetRow(8, "Risk:Reward 1:" + DoubleToString(g_dir.Rr(), 1), CLR_TEXT);
+      string rr_tag = (dir == AT_SIG_HOLD) ? "Indicative Risk:Reward 1:" : "Risk:Reward 1:";
+      g_main.SetRow(8, rr_tag + DoubleToString(g_dir.Rr(), 1), CLR_TEXT);
      }
 
    //--- session (information only) + the real expected duration
@@ -636,7 +701,7 @@ int OnInit()
    main_sep[0] = true;  // under title
    main_sep[1] = true;  // under bid/ask
    main_sep[2] = true;  // under regime
-   main_sep[4] = true;  // under confidence
+   main_sep[4] = true;  // under evidence
    main_sep[8] = true;  // under risk:reward
    main_sep[9] = true;  // under session
    main_sep[10] = true; // under status
@@ -682,6 +747,8 @@ int OnInit()
    //--- Phase 4/6: the trade manager (magic derived, never an input)
    g_magic = DeriveMagic();
    g_trade.Init(_Symbol, g_magic, 20, g_symbol);
+   g_had_trade = g_trade.HasAny();
+   g_had_position = g_trade.HasPosition();
 
    //--- Phase 5: safety, Phase 6: scoreboard
    g_safety.Init();
@@ -689,7 +756,7 @@ int OnInit()
 
    //--- first full pass, then the heartbeat
    RunBrains(true);
-   g_trade.Manage();
+   ManageTrades();
    UpdateUI();
 
    //--- honest warning until Phase 7 has proven the numbers
@@ -697,7 +764,7 @@ int OnInit()
    if(acct_mode != ACCOUNT_TRADE_MODE_DEMO)
       Print("Autotrader: WARNING - this is NOT a demo account. Phase 7 ",
             "validation (Strategy Tester + walk-forward + demo forward) is ",
-            "not finished yet, so the confidence threshold is still unproven. ",
+            "not finished yet, so execution performance is still unvalidated. ",
             "Consider running this on demo first.");
 
    Print("Autotrader V1.0 ready | ", _Symbol, " ", TFName(),
@@ -739,7 +806,7 @@ void OnTick()
    if(g_compatible_tf)
      {
       RunBrains(false);
-      g_trade.Manage();          // ladder + break-even need every tick
+      ManageTrades();          // ladder + break-even need every tick
       CheckTradeFinished();
      }
    UpdateUI();
@@ -753,7 +820,7 @@ void OnTimer()
    if(g_compatible_tf)
      {
       RunBrains(false);
-      g_trade.Manage();
+      ManageTrades();
       CheckTradeFinished();
 
       //--- once per closed lane bar: gap shock check + the audit line

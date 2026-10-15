@@ -125,9 +125,9 @@ public:
      { return (m_info.kind == AT_REGIME_PULLBACK_UP || m_info.kind == AT_REGIME_PULLBACK_DOWN); }
    bool              IsRangeExtreme(void) const
      { return (m_info.kind == AT_REGIME_RANGE_TOP || m_info.kind == AT_REGIME_RANGE_BOTTOM); }
-   //--- tradable = a direction may be spoken at all in this regime.
-   //--- VOLATILE / QUIET / TRANSITION / CALIBRATING / range-middle are
-   //--- HOLD territory by design (this is what protects the 98%).
+   //--- Regime-only execution gate; directional evidence is scored separately.
+   //--- VOLATILE / QUIET / TRANSITION / CALIBRATING / range-middle block new
+   //--- entries, but the direction engine may still display a supported bias.
    bool              Tradable(void)   const
      { return (IsTrend() || IsPullback() || IsRangeExtreme()); }
    //--- note: no whole-struct getter - callers use the typed getters
