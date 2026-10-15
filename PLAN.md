@@ -65,6 +65,19 @@ spread, commission, fees, swap, slippage and gaps, and is not a stop-fill promis
 
 ## 1B. Break-even and adaptive profit protection
 
+**15 Oct owner override (current behavior):** Inputs are Auto Trading=true,
+TrailStop=true, SL=false. SL controls only initial broker-stop placement on new
+market/limit orders; the planned SL is always retained internally for sizing
+and R-based activation and persisted for restart/fill restoration. A no-SL
+entry must not have that internal reference restored as a broker SL. TrailStop
+controls both adaptive updates and TP1 stop protection. With trailing OFF,
+TP1/TP2/TP3 partial closes continue but no SL is added/moved; an existing SL is
+left unchanged. With trailing ON, activation or TP1 can place the first
+cost-aware protective SL, subject to broker constraints. No initial SL means
+no broker-stop protection until that placement succeeds. This supersedes any
+older “always hard SL” or “one input only” requirements below. See README's
+four-combination table and native MT5 validation checklist.
+
 **Textbook break-even** means moving the stop to Entry. The live manager uses a
 more conservative, cost-aware floor once a trade has earned enough room:
 
@@ -100,7 +113,7 @@ trigger guarantees the eventual execution price.
 |---|----------|
 | 1 | **EA runtime is pure MQL5** (no Python, DLL, training or external service); Python scripts in `tools/` are development-only checks and are never copied into MT5. |
 | 2 | Any **symbol**; chart **timeframe must be M5, M15 or M30** (see 4.4). |
-| 3 | Zero inputs except one: **AutoTrading ON/OFF**. Everything else self-configures. |
+| 3 | Owner inputs: **AutoTrading=true, TrailStop=true, SL=false**. Adaptive distances and sizing self-configure. |
 | 4 | **No session blocking.** Trade whenever suitable conditions exist. Safety freezes only (news shock, quote failure, spread explosion, weekend gaps). |
 | 5 | Fully automatic direction display AND fully automatic trading. |
 | 6 | **TP ladder (owner's idea):** computed TP = D → TP1 = 60%·D, TP2 = 80%·D, TP3 = 100%·D. Partial close 50% / 30% / remainder. An adaptive, cost-aware non-loss trail may arm before TP1 (M5 does not wait for TP1); TP1 also arms protection without loosening a better stop. Stops obey broker stop/freeze limits and do not guarantee fills or net P/L. |
@@ -114,7 +127,7 @@ trigger guarantees the eventual execution price.
 | 14 | **Regime labels must be SPECIFIC (13 Oct 2026):** never a bare TRENDING/RANGING. The row must say direction + strength, or where price sits in the range (full agreed list in 3.5). Regime row stays plain soft text (decision #12). |
 | 15 | **Option A locked (14 Oct 2026):** one direction per chart. The panel reports the direction product of the chart's own timeframe (M5 = scalping, M15 = short-term, M30 = intraday) and trades only that lane. Three lanes wanted → three charts, each with its own panel, orders and counters. No extra panel rows were added. |
 | 16 | **Full 2026 indicator stack locked (14 Oct 2026):** Nadaraya–Watson, Ehlers DSP family, Kalman, Smart-Money Concepts and volume-flow tools are all built as Phase 3 evidence — hand-written MQL5, no external library. |
-| 17 | **Still zero inputs (reaffirmed 14 Oct 2026):** Phases 3–6 added *no* user settings. Every new number (weights, thresholds, distances, lot size, news window, daily-loss limit, equity floor) is either measured from the market or derived from the symbol's own profile. `Auto Trading` ON/OFF remains the only control. |
+| 17 | **Still zero inputs (reaffirmed 14 Oct 2026):** Phases 3–6 added *no* user settings. Every new number (weights, thresholds, distances, lot size, news window, daily-loss limit, equity floor) is either measured from the market or derived from the symbol's own profile. Superseded by the 15 Oct owner decision: Auto Trading, TrailStop and SL are now the three controls. |
 | 18 | **Demo until proven (14 Oct 2026):** because Phases 3–6 landed together, the EA runs on a demo account until Phase 7 (tester + walk-forward + demo forward) confirms the scoreboard. Real money only after that. |
 | 19 | **First runtime report fixed (14 Oct 2026):** attaching to some symbols printed `Autotrader (EURUSDm,M15) array out of range in 'VolumeFlow.mqh' (200,38)` — the session volume-profile walk. The low-side pointer incremented (`dn++`) instead of walking down, so whenever the top of the session range held no volume it climbed from bin to bin until it ran off the end of `double bin[24]`; which symbols died depended only on their session profile, which is why others ran normally. The same neighbour read also leaned on a range guard written *inside* a `?:`, which does not bound a fixed-size array read. Fixed: `dn--`, both neighbour reads and the order-log ticket read in `TradeEngine.mqh` moved behind plain `if`s, and `tools/volume_profile_sim.py` now reproduces the old fault and pins the new behaviour. |
 | 20 | **Scoring must remain visible (historic owner report, 14 Oct 2026):** the original one-sided flow displayed no parts until a side had passed a three-vote candidate check. That was first changed to show a provisional side without allowing it to latch. **Current implementation supersedes that interim behavior:** it scores BUY and SELL independently, displays both scores and a directional lead/tier when the gap is at least five points, and labels weaker evidence as bias rather than a trade signal. Execution thresholds and hard gates remain separate. `tools/score_sim.py` checks that a display bias cannot bypass trade qualification. |
@@ -619,7 +632,7 @@ is not a broker fill simulator, MetaEditor compile, backtest or profitability re
 with no add-ons later. Its MT5/Strategy Tester path is pure MQL5; the Python
 policy simulation in section 6B.4 is only a development check, not Phase 7
 performance evidence. Phase 7 must judge the EA **exactly as built**, including
-Phase 8's adaptive trailing stop: nothing is tuned in Phase 7, so the zero-inputs
+Phase 8's adaptive trailing stop: nothing is tuned in Phase 7, so the self-configuring
 rule (decision 17) holds and the EA itself gets no test code. Phase 9 tuning is
 considered only after Phase 7 results.
 
@@ -693,7 +706,7 @@ bound of 95.7% and passes; 4 losses (98.0%) gives 94.97% and fails. So G2 means
 > (native compilation and Phase 7 validation) is still outstanding. Keep it on
 > demo until those checks are completed.**
 
-> A **pure MQL5, one-input, self-configuring EA** for any symbol on M5/M15/M30
+> A **pure MQL5, three-input, self-configuring EA** for any symbol on M5/M15/M30
 > charts: it scores BUY and SELL evidence independently, shows a directional bias
 > separately from a qualified trade signal, and retains regime, execution, safety,
 > and risk gates before auto-trading. It manages positions via a **60/80/100 TP

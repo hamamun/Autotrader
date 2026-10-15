@@ -5,8 +5,8 @@
 //| Phase 6: Auto-execution + the owner's Win/Loss/BE scoreboard and  |
 //|          the CSV audit trail.                                     |
 //|                                                                   |
-//| The only input is Auto Trading ON/OFF. Everything else is decided |
-//| by the EA from the symbol it is attached to and the market itself.|
+//| Inputs: Auto Trading, TrailStop and SL. Adaptive distances are    |
+//| decided by the EA from the symbol and the market itself.         |
 //+------------------------------------------------------------------+
 #property copyright   "Autotrader"
 #property version     "1.00"
@@ -24,8 +24,10 @@
 #include <Autotrader/StatsKeeper.mqh>
 #include <Autotrader/TradeEngine.mqh>
 
-//--- the only user input (owner decision)
+//--- owner controls; distances and risk sizing remain self-configuring
 input bool InpAutoTrading = true; // Auto Trading
+input bool InpTrailStop   = true; // TrailStop
+input bool InpSL          = false; // SL
 
 //--- panels
 CInfoPanel          g_main;      // MAIN panel (signal view)
@@ -635,6 +637,7 @@ void UpdateMainPanel(void)
 
       double sl_diff = sl - entry;
       string sl_tag = (dir == AT_SIG_HOLD) ? "Indicative Stop Loss: " : "Stop Loss: ";
+      if(!InpSL) sl_tag="Risk reference (SL OFF): ";
       g_main.SetRow(6, sl_tag + FmtPrice(sl) + " / est. " +
                        FmtUsd(EstUsd(sl_diff, lots)) + " (" + FmtPts(sl_diff) + ")", CLR_TEXT);
 
@@ -759,6 +762,8 @@ void UpdateLivePanel(void)
    string st;
    if(g_trade.st[i].is_pending)
       st = "STATUS: Waiting - entry at " + FmtPrice(g_trade.st[i].entry);
+   else if(!InpTrailStop)
+      st="STATUS: Managing TP ladder - trailing OFF; existing SL unchanged";
    else if(!g_trade.st[i].tp1_hit && g_trade.st[i].trail_armed &&
            g_trade.st[i].be_locked &&
            g_trade.st[i].trail_stage==ATTE_TRAIL_FOLLOWING)
@@ -868,7 +873,7 @@ int OnInit()
 
    //--- Phase 4/6: the trade manager (magic derived, never an input)
    g_magic = DeriveMagic();
-   g_trade.Init(_Symbol, g_magic, 20, g_symbol);
+   g_trade.Init(_Symbol, g_magic, 20, g_symbol, InpTrailStop, InpSL);
    g_had_trade = g_trade.HasAny();
    g_had_position = g_trade.HasPosition();
 
@@ -895,12 +900,21 @@ int OnInit()
          " | ", g_symbol.ClassLabel(), " profile, threshold ",
          IntegerToString(g_dir.Threshold()), "%",
          " | auto trading ", (InpAutoTrading ? "ON" : "OFF"),
+         " | TrailStop ", (InpTrailStop ? "ON" : "OFF"),
+         " | initial SL ", (InpSL ? "ON" : "OFF"),
          " | account ", (acct_mode == ACCOUNT_TRADE_MODE_DEMO ? "demo" : "LIVE"));
-   g_stats.Log("INIT", StringFormat("lane %s magic %d threshold %d account %s auto %s",
+   g_stats.Log("INIT", StringFormat("lane %s magic %d threshold %d account %s auto %s trail %s initial_sl %s",
                                      g_dir.LaneName(), (int)g_magic,
                                      g_dir.Threshold(),
                                      (acct_mode == ACCOUNT_TRADE_MODE_DEMO ? "demo" : "live"),
-                                     (InpAutoTrading ? "on" : "off")));
+                                     (InpAutoTrading ? "on" : "off"),
+                                     (InpTrailStop ? "on" : "off"),
+                                     (InpSL ? "on" : "off")));
+
+   if(!InpSL)
+      Print("Autotrader: initial SL is OFF. New entries have no broker-side stop ",
+            (InpTrailStop ? "until profit protection is accepted." :
+                            "and trailing/TP1 stop protection is also OFF."));
 
    EventSetTimer(1);   // 1-second heartbeat
    return INIT_SUCCEEDED;

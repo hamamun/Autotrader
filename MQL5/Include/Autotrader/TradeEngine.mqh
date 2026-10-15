@@ -5,9 +5,9 @@
 //| What it does, in plain words:                                     |
 //|  * sizes the lot from the account's own equity and the 1% risk    |
 //|    dial - never a fixed lot, never a guess;                       |
-//|  * sends the order with a HARD broker-side stop loss on every     |
-//|    single trade (PLAN: never trade without one) plus the broker-  |
-//|    side TP3, so the trade stays protected even if this EA dies;   |
+//|  * sends TP3 and an optional initial broker SL (default OFF);    |
+//|    retains the planned SL internally for sizing and trail R;     |
+//|    entries without SL are unprotected until a trail is accepted;  |
 //|  * walks the owner's ladder: TP1 60% -> close 50% of the lot,     |
 //|    TP2 80% -> close 30%, TP3 100% -> close the rest;              |
 //|  * adapts a non-loss trailing stop to timeframe, market state,    |
@@ -71,8 +71,8 @@ struct SATTradeState
    bool     is_pending;        // still a limit order, not a position yet
    int      dir;               // +1 buy, -1 sell
    double   entry;             // position open price / limit price
-   double   sl_initial;
-   double   sl_now;
+   double   sl_initial;        // planned risk reference, even if initial SL is OFF
+   double   sl_now;            // last submitted/remembered broker SL; zero means none
    double   tp1, tp2, tp3;
    double   v0;                // volume when the trade started
    double   v_now;
@@ -105,6 +105,8 @@ public:
 private:
    string   m_symbol;
    ulong    m_magic;
+   bool     m_trailing_enabled;
+   bool     m_initial_sl_enabled;
    int      m_digits;
    double   m_point;
    ulong    m_deviation;
@@ -151,7 +153,8 @@ private:
 public:
             CTradeEngine(void);
    bool     Init(const string symbol, const ulong magic, const ulong deviation_pts,
-                 CSymbolIntelligence &profile);
+                 CSymbolIntelligence &profile, const bool trailing_enabled,
+                 const bool initial_sl_enabled);
    void     Sync(void);                       // positions + pending orders
    double   CalcLots(const double sl_dist, const double risk_pct, const double atr);
    double   NormVolume(const double v) const;
@@ -183,6 +186,8 @@ CTradeEngine::CTradeEngine(void)
   {
    m_symbol = "";
    m_magic = 0;
+   m_trailing_enabled = true;
+   m_initial_sl_enabled = false;
    m_digits = 2;
    m_point = 0.01;
    m_deviation = 20;
@@ -246,10 +251,13 @@ int CTradeEngine::PendingLifetimeSeconds(const int expected_seconds) const
 
 //+------------------------------------------------------------------+
 bool CTradeEngine::Init(const string symbol, const ulong magic,
-                        const ulong deviation_pts, CSymbolIntelligence &profile)
+                        const ulong deviation_pts, CSymbolIntelligence &profile,
+                        const bool trailing_enabled, const bool initial_sl_enabled)
   {
    m_symbol   = symbol;
    m_magic    = magic;
+   m_trailing_enabled = trailing_enabled;
+   m_initial_sl_enabled = initial_sl_enabled;
    m_digits   = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
    m_point    = SymbolInfoDouble(symbol, SYMBOL_POINT);
    m_deviation = deviation_pts;
@@ -564,7 +572,8 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
       //--- we opened this ourselves a moment ago - keep the exact plan
       st[idx].entry      = m_expect_entry;
       st[idx].sl_initial = m_expect_sl;
-      st[idx].sl_now     = m_expect_sl;
+      // sl_initial is the internal risk reference, not necessarily a live SL.
+      st[idx].sl_now     = (m_initial_sl_enabled ? m_expect_sl : 0.0);
       st[idx].tp1        = m_expect_tp1;
       st[idx].tp2        = m_expect_tp2;
       st[idx].tp3        = m_expect_tp3;
@@ -598,7 +607,8 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
         {
          // An early trail can move the stop to entry before TP1, so a stop
          // above/below entry must no longer be used to infer TP1 completion.
-         st[idx].be_armed = (st[idx].tp1_hit || st[idx].trail_armed);
+         st[idx].be_armed = (st[idx].trail_armed ||
+                             (m_trailing_enabled && st[idx].tp1_hit));
          st[idx].be_locked = sl_at_or_better;
          if(st[idx].v0 <= 0.0) st[idx].v0 = st[idx].v_now;
         }
@@ -616,7 +626,8 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
         {
          double ratio = st[idx].v_now / st[idx].v0;
          if(ratio <= 0.25)      { st[idx].tp1_hit = true; st[idx].tp2_hit = true; }
-         else if(ratio <= 0.55) { st[idx].tp1_hit = true; st[idx].be_armed = true; }
+         else if(ratio <= 0.55)
+           { st[idx].tp1_hit = true; st[idx].be_armed = m_trailing_enabled; }
         }
 
       if(st[idx].trail_best <= 0.0 && !st[idx].is_pending)
@@ -847,6 +858,9 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
       return false;
      }
 
+   // Always require a valid internal risk reference, even when SL is OFF.
+   if(sl<=0.0 || (entry-sl)*(double)dir<=m_point)
+     { m_last_error="initial risk reference unavailable"; return false; }
    double sl_dist = MathAbs(entry - sl);
    double lots = CalcLots(sl_dist, risk_pct, atr);
    if(lots <= 0.0)
@@ -857,7 +871,8 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
      }
 
    double e  = NormPrice(entry);
-   double s  = NormPrice(sl);
+   double planned_sl = NormPrice(sl);
+   double s  = (m_initial_sl_enabled ? planned_sl : 0.0);
    double t3 = NormPrice(tp3);
 
    //--- one more reality check against the broker's minimum distance
@@ -866,9 +881,9 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
    double ref = (dir == 1) ? ask : bid;
    if(m_stops_price > 0.0)
      {
-      if(dir == 1 && (ref - s < m_stops_price || t3 - ref < m_stops_price))
+      if(dir == 1 && ((s>0.0 && ref - s < m_stops_price) || t3 - ref < m_stops_price))
         { m_last_error = "levels closer than the broker's stops level"; return false; }
-      if(dir == -1 && (s - ref < m_stops_price || ref - t3 < m_stops_price))
+      if(dir == -1 && ((s>0.0 && s - ref < m_stops_price) || ref - t3 < m_stops_price))
         { m_last_error = "levels closer than the broker's stops level"; return false; }
      }
 
@@ -876,7 +891,7 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
    m_expect_new = true;
    m_expect_dir = dir;
    m_expect_entry = e;
-   m_expect_sl = s;
+   m_expect_sl = planned_sl; // persisted as SL0 for risk sizing and R thresholds
    m_expect_tp1 = NormPrice(tp1);
    m_expect_tp2 = NormPrice(tp2);
    m_expect_tp3 = t3;
@@ -1112,6 +1127,8 @@ void CTradeEngine::ManageTrailingStop(const int idx,const SATTrailContext &ctx,
                                       const double mark,const double bid,
                                       const double ask)
   {
+   if(!m_trailing_enabled)
+      return;
    if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || st[idx].is_pending ||
       !PositionSelectByTicket(st[idx].ticket) || mark<=0.0)
       return;
@@ -1129,17 +1146,21 @@ void CTradeEngine::ManageTrailingStop(const int idx,const SATTrailContext &ctx,
      }
 
    UpdateTrailContext(idx,ctx);
-   double risk=MathAbs(st[idx].entry-st[idx].sl_initial);
+   // A zero SL is absence, never a price from which to calculate R.
+   double risk=(st[idx].sl_initial>0.0 ?
+                MathAbs(st[idx].entry-st[idx].sl_initial) : 0.0);
    if(risk<=m_point && PositionGetDouble(POSITION_SL)>0.0)
       risk=MathAbs(st[idx].entry-PositionGetDouble(POSITION_SL));
-   if(risk<=m_point)
+   if(risk<=m_point && !st[idx].tp1_hit && !st[idx].trail_armed)
      {
       st[idx].trail_reason="waiting - initial risk unavailable";
       return;
      }
 
    double favorable=MathMax(0.0,(mark-st[idx].entry)*(double)dir);
-   double progress_r=favorable/risk;
+   double progress_r=0.0;
+   if(risk>m_point)
+      progress_r=favorable/risk;
    double floor=BreakEvenFloor(idx);
    double floating=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
    double arm=TrailArmThreshold(idx,ctx);
@@ -1147,11 +1168,13 @@ void CTradeEngine::ManageTrailingStop(const int idx,const SATTrailContext &ctx,
 
    if(!st[idx].trail_armed)
      {
-      if(progress_r<arm || floating<=0.0)
+      if(!st[idx].tp1_hit && (progress_r<arm || floating<=0.0))
         {
          st[idx].trail_reason=StringFormat("waiting for +%.2fR profit",arm);
          return;
         }
+      if(floor<=0.0)
+         return;
       double live_stops=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_STOPS_LEVEL)*m_point;
       double live_freeze=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_FREEZE_LEVEL)*m_point;
       double min_distance=MathMax(MathMax(m_stops_price,live_stops),
@@ -1297,6 +1320,8 @@ void CTradeEngine::ManageTrailingStop(const int idx,const SATTrailContext &ctx,
 //+------------------------------------------------------------------+
 bool CTradeEngine::MoveStopTo(const int idx, const double new_sl, const string why)
   {
+   if(!m_trailing_enabled)
+      return false;
    if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || st[idx].is_pending ||
       !PositionSelectByTicket(st[idx].ticket))
       return false;
@@ -1465,7 +1490,7 @@ bool CTradeEngine::CancelPending(const string why)
   }
 
 //+------------------------------------------------------------------+
-//| protection must exist at all times - repair it if it does not     |
+//| repair intended protection, never an internal-only initial SL     |
 //+------------------------------------------------------------------+
 bool CTradeEngine::EnsureProtection(const int idx)
   {
@@ -1482,17 +1507,19 @@ bool CTradeEngine::EnsureProtection(const int idx)
    if(m_last_protect_try > 0 && now - m_last_protect_try < 5)
       return true;
 
-   double want_sl=NormStopPrice(st[idx].sl_now,st[idx].dir);
+   // Trailing OFF freezes the broker SL exactly as it is (including zero).
+   // With trailing ON, repair only a previously submitted stop, not SL0:
+   // SL0 may be an internal-only risk reference for an intentionally bare entry.
+   double want_sl=(m_trailing_enabled ?
+                   NormStopPrice(st[idx].sl_now,st[idx].dir) : sl_brok);
    double want_tp=NormPrice(st[idx].tp3);
    double tol=m_point*0.5;
-   bool profit_lock=(st[idx].trail_armed || st[idx].be_armed ||
-                     st[idx].be_locked || st[idx].tp1_hit);
+   bool profit_lock=m_trailing_enabled &&
+                    (st[idx].trail_armed || st[idx].be_armed);
    if(want_sl<=0.0)
      {
       if(profit_lock)
          want_sl=BreakEvenFloor(idx);
-      else
-         want_sl=NormStopPrice(st[idx].sl_initial,st[idx].dir);
      }
    if(profit_lock && want_sl>0.0)
      {
@@ -1522,9 +1549,8 @@ bool CTradeEngine::EnsureProtection(const int idx)
       want_sl = sl_brok;
    if(want_tp <= 0.0)
       want_tp = tp_brok;
-   if(want_sl<=0.0)
-      return false;
-   bool sl_change=(sl_brok<=0.0 || MathAbs(sl_brok-want_sl)>tol);
+   // A TP-only repair is valid with no SL. Never invent an initial stop.
+   bool sl_change=(MathAbs(sl_brok-want_sl)>tol);
    if(sl_change)
      {
       double bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
@@ -1606,7 +1632,7 @@ bool CTradeEngine::Manage(const SATTrailContext &ctx)
       int    dir   = st[i].dir;
       double mark  = (dir == 1) ? bid : ask;    // the price we would close at
 
-      //--- keep the broker-side protection honest, then manage the adaptive
+      //--- repair only intended protection, then manage the adaptive
       //--- non-loss trail before the TP ladder so M5 can protect profit early.
       EnsureProtection(i);
       ManageTrailingStop(i,ctx,mark,bid,ask);
@@ -1619,17 +1645,20 @@ bool CTradeEngine::Manage(const SATTrailContext &ctx)
            {
             st[i].tp1_hit=true;
             st[i].tp1_time=TimeCurrent();
-            st[i].be_armed=true;
-            st[i].trail_armed=true;
-            if(st[i].trail_stage<ATTE_TRAIL_PROTECTED)
-               st[i].trail_stage=ATTE_TRAIL_PROTECTED;
-            if(st[i].trail_best<=0.0) st[i].trail_best=mark;
-            st[i].trail_reason="TP1 reached - protecting profit";
-            // The floor includes spread/fees/swap. MoveStopTo is one-way,
-            // so TP1 can never pull a better early trail back to entry.
-            if(MoveStopTo(i,BreakEvenFloor(i),
-                          "TP1 hit - non-loss stop protected"))
-               st[i].be_locked=true;
+            if(m_trailing_enabled)
+              {
+               st[i].be_armed=true;
+               st[i].trail_armed=true;
+               if(st[i].trail_stage<ATTE_TRAIL_PROTECTED)
+                  st[i].trail_stage=ATTE_TRAIL_PROTECTED;
+               if(st[i].trail_best<=0.0) st[i].trail_best=mark;
+               st[i].trail_reason="TP1 reached - protecting profit";
+               // The floor includes spread/fees/swap. MoveStopTo is one-way,
+               // so TP1 can never pull a better early trail back to entry.
+               if(MoveStopTo(i,BreakEvenFloor(i),
+                             "TP1 hit - non-loss stop protected"))
+                  st[i].be_locked=true;
+              }
             SaveState(i);
            }
          continue;   // one action per position per tick
@@ -1719,6 +1748,8 @@ double CTradeEngine::TpProgress(const int idx) const
 
 string CTradeEngine::BeStateText(const int idx) const
   {
+   if(!m_trailing_enabled)
+      return "OFF (existing SL unchanged)";
    if(idx < 0 || !st[idx].active)
       return "not armed";
    if(st[idx].be_locked)
@@ -1732,22 +1763,29 @@ string CTradeEngine::SlJourneyText(const int idx) const
   {
    if(idx<0 || !st[idx].active)
       return "";
-   string now=DoubleToString(st[idx].sl_now,m_digits);
-   if(MathAbs(st[idx].sl_now-st[idx].sl_initial)<m_point*0.5)
+   double live_sl=st[idx].sl_now;
+   if(!st[idx].is_pending && PositionSelectByTicket(st[idx].ticket))
+      live_sl=PositionGetDouble(POSITION_SL);
+   if(live_sl<=0.0)
+      return "NONE (no broker-side stop)";
+   string now=DoubleToString(live_sl,m_digits);
+   if(MathAbs(live_sl-st[idx].sl_initial)<m_point*0.5)
       return now+"  (initial)";
    if(st[idx].trail_armed && st[idx].be_locked)
-      return now+"  (initial "+GLYPH_ARROW+" non-loss trail)";
+      return now+"  (non-loss trail)";
    bool at_be=(st[idx].dir==1)
-              ? (st[idx].sl_now>=st[idx].entry-m_point)
-              : (st[idx].sl_now<=st[idx].entry+m_point);
+              ? (live_sl>=st[idx].entry-m_point)
+              : (live_sl<=st[idx].entry+m_point);
    if(at_be)
-      return now+"  (started "+DoubleToString(st[idx].sl_initial,m_digits)+
+      return now+"  (risk reference "+DoubleToString(st[idx].sl_initial,m_digits)+
              " "+GLYPH_ARROW+" protected at entry)";
-   return now+"  (started "+DoubleToString(st[idx].sl_initial,m_digits)+")";
+   return now+"  (risk reference "+DoubleToString(st[idx].sl_initial,m_digits)+")";
   }
 
 string CTradeEngine::TrailStatusText(const int idx) const
   {
+   if(!m_trailing_enabled)
+      return "OFF (existing SL unchanged)";
    if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active)
       return "OFF";
    if(st[idx].is_pending)

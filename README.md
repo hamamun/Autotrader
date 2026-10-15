@@ -1,6 +1,6 @@
 # Autotrader
 
-MT5 trading EA — pure MQL5, with one owner-facing input: Auto Trading ON/OFF.
+MT5 trading EA — pure MQL5, with three owner-facing inputs: Auto Trading, TrailStop and SL.
 
 **Research target, not a result:** the project aims for a high rate of successful
 trades, but the 98% motto is unverified. Code review and synthetic checks do not
@@ -16,9 +16,10 @@ three timeframes and may place orders when Auto Trading is enabled; keep it on
 demo until native compilation and independent validation are completed and
 reviewed.
 
-> The one input is still **Auto Trading** ON/OFF. Phases 3–6 and 8 added **no**
-> new settings — every number is measured from the market or derived from the
-> symbol's own profile.
+> **Inputs:** Auto Trading = **true**, TrailStop = **true**, SL = **false**.
+> Distances, activation thresholds and lot sizing still self-configure.
+> **Default entries have no initial broker-side SL.** Until a protective stop
+> is accepted, there is no broker-side stop-loss protection.
 
 What works right now:
 
@@ -61,14 +62,15 @@ What works right now:
   own dial × its own wiggle, and Expected Duration is computed from the target
   distance and this symbol's real speed — not a fixed phrase.
 - **Trade engine (Phases 4 + 8, implemented in source).** Risk-sized lots,
-  broker-side initial SL and TP3, the TP1/TP2/TP3 ladder (50% / 30% / remainder),
+  optional broker-side initial SL and broker-side TP3, the TP1/TP2/TP3 ladder (50% / 30% / remainder),
   time exit, restart restoration, and missing-protection repair. Its adaptive
   trailing policy uses the active M5/M15/M30 lane, ATR/volatility, regime,
   directional-score change and recent structure. M5 can arm before TP1.
   Proposed trail levels are clamped to the profitable side of Entry and an
   entry-plus-cost floor (current spread, estimated round-turn fees and negative
   swap). Broker stop/freeze rules may delay placing that level, leaving the
-  existing stop in place. TP1 arms the same protection without loosening a
+  existing stop in place (or no stop if none has been placed). With TrailStop
+  enabled, TP1 arms the same protection without loosening a
   better trail. A stop price cannot guarantee the final fill or net P/L through
   gaps, slippage, changing costs or broker rejection.
 - **LIVE TRADING panel (Phases 4 + 8).** It appears only while a real position or
@@ -134,9 +136,41 @@ folder; changing slashes or the script's location won't replace the missing
 header. If several MT5 installations are open, check the data folder for the
 instance whose MetaEditor you used, then compile again.
 
-The only input is **Auto Trading** ON/OFF. Everything else self-configures.
-Turn it OFF and the EA keeps analysing and displaying directions but sends no
-orders.
+### Trading controls
+
+| Input | Default | Behavior |
+|---|---|---|
+| Auto Trading (`InpAutoTrading`) | `true` | Allows new automatic entries. OFF keeps analysis and existing-trade management running. |
+| TrailStop (`InpTrailStop`) | `true` | Enables adaptive trailing and TP1 break-even/profit protection. OFF leaves existing SL unchanged; TP partial closes and time exits continue. |
+| SL (`InpSL`) | `false` | Controls **initial SL placement on new orders**, both market and limit. OFF sends SL = 0, not a hidden broker stop. |
+
+| SL | TrailStop | Behavior |
+|---|---|---|
+| false | true | No initial SL; first protective SL is added when adaptive activation qualifies or TP1 triggers protection, subject to broker rules. |
+| true | true | Initial SL, followed by adaptive profit protection. |
+| true | false | Initial SL stays fixed; TP1 does not move it. |
+| false | false | No initial SL and no SL added at TP1 or by trailing. |
+
+The EA always calculates the planned SL internally for position sizing and the
+M5/M15/M30 R thresholds, and persists that reference across terminal restarts
+and pending-order fills. This is **not** a broker-side SL and does not cap loss.
+The MAIN panel labels this level as a risk reference when SL is OFF; the LIVE
+panel shows NONE until a real broker stop exists. Protection repair does not
+mistake that internal reference for a missing initial SL. TP3 stays broker-side.
+
+Changing SL affects new entries, not an already open trade. Turning TrailStop
+OFF preserves a previously placed SL without further SL updates (including TP1
+break-even). Turning it back ON resumes management; a trade already past TP1
+can receive protection when broker rules allow it. TP-only repair can still run
+with SL = 0. Broker rejection, gaps and slippage can cause loss even after a
+protective stop is placed.
+
+**Native MT5 validation checklist:** test all four combinations for BUY/SELL,
+market/limit and M5/M15/M30; restart before activation and after protection;
+fill a pending no-SL entry after restart; reach TP1 with trailing OFF; toggle
+trailing OFF after an SL exists and confirm it stays unchanged; toggle it back
+ON after TP1; reject an SL update with broker stop/freeze limits and confirm a
+later retry; remove TP on a no-SL trade and confirm repair does not add an SL.
 
 ### Reading the panel while it learns a symbol
 
@@ -207,3 +241,8 @@ MT5:
   regime/evidence-sensitive ATR gaps, the pre-TP1 M5 path, cost-floor and broker
   distance constraints, one-way stop ratcheting, and the MQL5 wiring. It mirrors
   policy arithmetic; it does not compile MQL5 or simulate broker execution.
+- `python3 tools/stop_controls_sim.py` — synthetic lifecycle and source-wiring
+  checks for all four SL/TrailStop combinations on M5/M15/M30, both directions,
+  market/limit intent, restart/fill risk retention, TP1, broker-delay retry,
+  disable/re-enable behavior, zero-risk guards and TP-only no-SL repair.
+  These checks are not native MQL5 execution or broker-fill evidence.
