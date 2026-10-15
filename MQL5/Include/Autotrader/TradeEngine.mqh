@@ -43,7 +43,8 @@ struct SATTradeState
    datetime tp1_time;
    bool     be_armed, be_locked;
    datetime opened;
-   int      expected_seconds;
+   int      expected_seconds;  // expected position duration
+   int      pending_ttl_seconds; // pending entry freshness window
    string   action;            // what the manager last did (panel STATUS)
   };
 
@@ -69,8 +70,11 @@ private:
    int      m_expect_dir;
    double   m_expect_entry, m_expect_sl, m_expect_tp1, m_expect_tp2, m_expect_tp3;
    int      m_expect_seconds;
+   int      m_expect_pending_ttl;
+   string   m_last_pending_event;
 
    int      FindState(const ulong ticket) const;
+   int      PendingLifetimeSeconds(const int expected_seconds) const;
    int      FreeSlot(void) const;
    void     DropState(const int idx);
    bool     AddStateFromBroker(const ulong ticket);
@@ -90,10 +94,11 @@ public:
    bool     Open(const int dir, const bool use_limit, const double entry,
                  const double sl, const double tp1, const double tp2, const double tp3,
                  const int expected_seconds, const double risk_pct, const double atr);
-   void     Manage(void);
+   bool     Manage(void);  // true when a locally stale pending order was cancelled
    void     SetExpectedDefault(const int seconds);
    bool     ClosePosition(const int idx, const string why);
-   bool     CancelPending(void);
+   bool     CancelPending(const string why);
+   string   LastPendingEvent(void) const { return m_last_pending_event; }
 
    //--- panel getters
    int      MainIdx(void) const;
@@ -125,6 +130,8 @@ CTradeEngine::CTradeEngine(void)
    m_expect_entry = 0.0; m_expect_sl = 0.0;
    m_expect_tp1 = 0.0; m_expect_tp2 = 0.0; m_expect_tp3 = 0.0;
    m_expect_seconds = 0;
+   m_expect_pending_ttl = 0;
+   m_last_pending_event = "";
    for(int i = 0; i < ATTE_MAX_STATES; i++)
      {
       st[i].ticket = 0;
@@ -141,8 +148,21 @@ CTradeEngine::CTradeEngine(void)
       st[i].be_armed = false; st[i].be_locked = false;
       st[i].opened = 0;
       st[i].expected_seconds = 0;
+      st[i].pending_ttl_seconds = 0;
       st[i].action = "";
      }
+  }
+
+//+------------------------------------------------------------------+
+int CTradeEngine::PendingLifetimeSeconds(const int expected_seconds) const
+  {
+   int bar_seconds = PeriodSeconds((ENUM_TIMEFRAMES)Period());
+   int ttl = (bar_seconds > 0) ? bar_seconds * 3 : 600;
+   if(expected_seconds > 0 && expected_seconds < ttl)
+      ttl = expected_seconds;
+   if(ttl < 600)
+      ttl = 600;
+   return ttl;
   }
 
 //+------------------------------------------------------------------+
@@ -269,6 +289,8 @@ void CTradeEngine::DropState(const int idx)
                      IntegerToString((long)st[idx].ticket));
    GlobalVariableDel("ATRET_" + IntegerToString((long)m_magic) + "_" +
                      IntegerToString((long)st[idx].ticket));
+   GlobalVariableDel("ATPE_" + IntegerToString((long)m_magic) + "_" +
+                     IntegerToString((long)st[idx].ticket));
    st[idx].active = false;
    st[idx].ticket = 0;
    st[idx].action = "";
@@ -305,6 +327,7 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
    st[idx].be_armed = false; st[idx].be_locked = false;
    st[idx].action = "";
    st[idx].expected_seconds = 0;
+   st[idx].pending_ttl_seconds = 0;
 
    if(is_pos)
      {
@@ -345,6 +368,7 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
       st[idx].tp2        = m_expect_tp2;
       st[idx].tp3        = m_expect_tp3;
       st[idx].expected_seconds = m_expect_seconds;
+      st[idx].pending_ttl_seconds = m_expect_pending_ttl;
       st[idx].v0         = st[idx].v_now;
       exact = true;
       m_expect_new = false;
@@ -358,10 +382,13 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
       //--- volume is left and whether the stop already sits at Entry.
       string gv = "ATRV0_" + IntegerToString((long)m_magic) + "_" + IntegerToString((long)ticket);
       string ge = "ATRET_" + IntegerToString((long)m_magic) + "_" + IntegerToString((long)ticket);
+      string gp = "ATPE_" + IntegerToString((long)m_magic) + "_" + IntegerToString((long)ticket);
       if(GlobalVariableCheck(gv))
          st[idx].v0 = GlobalVariableGet(gv);
       if(GlobalVariableCheck(ge))
          st[idx].expected_seconds = (int)GlobalVariableGet(ge);
+      if(GlobalVariableCheck(gp))
+         st[idx].pending_ttl_seconds = (int)GlobalVariableGet(gp);
 
       bool sl_at_or_better =
          (st[idx].dir == 1 && st[idx].sl_now > 0.0 &&
@@ -403,6 +430,10 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
       GlobalVariableSet("ATRET_" + IntegerToString((long)m_magic) + "_" +
                         IntegerToString((long)ticket),
                         (double)st[idx].expected_seconds);
+   if(st[idx].is_pending && st[idx].pending_ttl_seconds > 0)
+      GlobalVariableSet("ATPE_" + IntegerToString((long)m_magic) + "_" +
+                        IntegerToString((long)ticket),
+                        (double)st[idx].pending_ttl_seconds);
 
    if(exact)
       st[idx].action = "opened";
@@ -606,6 +637,7 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
    m_expect_tp2 = NormPrice(tp2);
    m_expect_tp3 = t3;
    m_expect_seconds = expected_seconds;
+   m_expect_pending_ttl = PendingLifetimeSeconds(expected_seconds);
 
    bool sent = false;
    for(int attempt = 1; attempt <= ATTE_MAX_RETRY && !sent; attempt++)
@@ -614,7 +646,7 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
         {
          long exp_mode = SymbolInfoInteger(m_symbol, SYMBOL_EXPIRATION_MODE);
          bool can_spec = ((exp_mode & SYMBOL_EXPIRATION_SPECIFIED) != 0);
-         datetime expir = TimeCurrent() + (datetime)MathMax(600, expected_seconds);
+         datetime expir = TimeCurrent() + (datetime)m_expect_pending_ttl;
          if(dir == 1)
             sent = can_spec
                    ? trade.BuyLimit(lots, e, m_symbol, s, t3, ORDER_TIME_SPECIFIED, expir, "AT3")
@@ -768,7 +800,7 @@ bool CTradeEngine::ClosePosition(const int idx, const string why)
   }
 
 //+------------------------------------------------------------------+
-bool CTradeEngine::CancelPending(void)
+bool CTradeEngine::CancelPending(const string why)
   {
    bool any = false;
    for(int i = 0; i < ATTE_MAX_STATES; i++)
@@ -776,7 +808,7 @@ bool CTradeEngine::CancelPending(void)
         {
          if(trade.OrderDelete(st[i].ticket))
            {
-            Print("Autotrader: pending entry cancelled (signal released)");
+            Print("Autotrader: pending entry cancelled (", why, ")");
             DropState(i);
             any = true;
            }
@@ -833,13 +865,49 @@ bool CTradeEngine::EnsureProtection(const int idx)
 //+------------------------------------------------------------------+
 //| MANAGE - one pass over every trade we own                         |
 //+------------------------------------------------------------------+
-void CTradeEngine::Manage(void)
+bool CTradeEngine::Manage(void)
   {
    Sync();
+   m_last_pending_event = "";
+   datetime now = TimeCurrent();
+   bool pending_expired = false;
+
+   //--- Pending entries have a maximum age of three chart bars (bounded
+   //--- by expected duration and a 10-minute minimum). Brokers that accept
+   //--- ORDER_TIME_SPECIFIED also receive this same expiry; this local check
+   //--- covers GTC-only symbols and acts as a second freshness guard.
+   for(int i = 0; i < ATTE_MAX_STATES; i++)
+     {
+      if(!st[i].active || !st[i].is_pending)
+         continue;
+      int ttl = st[i].pending_ttl_seconds;
+      if(ttl <= 0)
+         ttl = PendingLifetimeSeconds(st[i].expected_seconds);
+      long age = (st[i].opened > 0) ? (long)(now - st[i].opened) : 0;
+      if(st[i].opened > 0 && age >= (long)ttl)
+        {
+         ulong ticket = st[i].ticket;
+         if(trade.OrderDelete(ticket))
+           {
+            string note = "order " + IntegerToString((long)ticket) +
+                          " expired locally after " + IntegerToString((int)age) +
+                          "s (limit " + IntegerToString(ttl) + "s)";
+            if(m_last_pending_event != "")
+               m_last_pending_event += "; ";
+            m_last_pending_event += note;
+            Print("Autotrader: pending entry expired - ", note);
+            DropState(i);
+            pending_expired = true;
+           }
+         else
+            m_last_error = "pending expiry cancellation failed: " + trade.ResultRetcodeDescription();
+        }
+     }
+
    double bid = SymbolInfoDouble(m_symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
    if(bid <= 0.0 || ask <= 0.0)
-      return;
+      return pending_expired;
 
    for(int i = 0; i < ATTE_MAX_STATES; i++)
      {
@@ -902,6 +970,7 @@ void CTradeEngine::Manage(void)
            }
         }
      }
+   return pending_expired;
   }
 
 //+------------------------------------------------------------------+

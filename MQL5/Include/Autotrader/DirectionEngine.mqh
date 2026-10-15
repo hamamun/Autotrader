@@ -1,10 +1,9 @@
 //+------------------------------------------------------------------+
 //| DirectionEngine.mqh                                               |
-//| Autotrader Phase 3 - the direction & confidence judge.            |
+//| Autotrader Phase 3 - the direction & evidence judge.              |
 //|                                                                   |
-//| This is the heart of the 98% motto. Its whole personality is:     |
-//| SAY NOTHING unless the evidence is overwhelming. HOLD is the      |
-//| default state; BUY/SELL is the rare exception.                    |
+//| BUY and SELL are scored independently; displayed evidence is      |
+//| separate from a qualified, risk-checked trade signal.             |
 //|                                                                   |
 //| How it works, in plain words:                                     |
 //|  1. It always reads three timeframes - M30 (the bias), M15 (the   |
@@ -58,12 +57,43 @@ enum ENUM_AT_SIG
 //--- score release band: a latched signal is dropped only when the
 //--- score falls this far BELOW the threshold (anti-flicker)
 #define ATDE_RELEASE_BAND 8
+#define ATDE_BIAS_MARGIN  5
+
+//--- A score is an evidence index, not a calibrated probability.
+struct SATDirectionEvidence
+  {
+   double bias;
+   double structure;
+   double trigger;
+   double zone;
+   double momentum;
+   double volume;
+   double fitness;
+   double quote;
+   int    score;
+  };
+
+void ATDE_ClearEvidence(SATDirectionEvidence &e)
+  {
+   e.bias = 0.0; e.structure = 0.0; e.trigger = 0.0; e.zone = 0.0;
+   e.momentum = 0.0; e.volume = 0.0; e.fitness = 0.0; e.quote = 0.0;
+   e.score = 0;
+  }
 
 int ATDE_Sign(const double v)
   {
    if(v > 0.0) return 1;
    if(v < 0.0) return -1;
    return 0;
+  }
+
+string ATDE_EvidenceTier(const int score)
+  {
+   if(score >= 85) return "very strong";
+   if(score >= 70) return "strong";
+   if(score >= 55) return "moderate";
+   if(score >= 40) return "developing";
+   return "weak";
   }
 
 //+------------------------------------------------------------------+
@@ -233,14 +263,17 @@ private:
    bool            m_ready;
 
    //--- the answer
-   int             m_dir;          // AT_SIG_*
-   int             m_eval_dir;     // direction the score was computed for
-   int             m_score;        // 0..100
+   int             m_dir;          // AT_SIG_* (latched, execution-qualified signal)
+   int             m_eval_dir;     // direction the trade score/plan was computed for
+   int             m_bias_dir;     // +1/-1 when BUY-vs-SELL evidence has a clear lead
+   int             m_score;        // selected direction's 0..100 evidence index
    int             m_threshold;    // from Symbol Intelligence
    int             m_vote;         // raw direction vote, for the audit trail
-   bool            m_tradable;     // every hard gate passed
+   bool            m_tradable;     // every hard gate and plan check passed
+   SATDirectionEvidence m_buy_evidence;
+   SATDirectionEvidence m_sell_evidence;
 
-   //--- evidence parts, 0..100 each (the audit trail)
+   //--- selected-side evidence parts, 0..100 each (the audit trail)
    int             m_p_bias, m_p_struct, m_p_trigger, m_p_zone;
    int             m_p_momentum, m_p_volume, m_p_fitness, m_p_quote;
    //--- what the printed parts describe (owner report, 14 Oct 2026):
@@ -275,6 +308,11 @@ private:
    CTFAnalysis*    LaneTF(void);
    bool            RegimeAllows(const ENUM_AT_REGIME kind, const int dir) const;
    int             LaneMaxMinutes(void) const;
+   void            ScoreSide(const int side, CTFAnalysis *lt, CTFAnalysis *tr,
+                             const double atr, const double stops_price,
+                             const double spread_price, const long spread_pts,
+                             const double spread_limit_pts, const int quote_age_sec,
+                             SATDirectionEvidence &out);
 
 public:
                      CDirectionEngine(void);
@@ -297,7 +335,17 @@ public:
    int               Score(void)          const { return m_score; }
    int               Threshold(void)      const { return m_threshold; }
    int               Vote(void)           const { return m_vote; }
+   int               BiasDir(void)        const { return m_bias_dir; }
+   int               BiasGap(void)        const { return m_buy_evidence.score - m_sell_evidence.score; }
+   int               BuyScore(void)       const { return m_buy_evidence.score; }
+   int               SellScore(void)      const { return m_sell_evidence.score; }
+   int               BiasScore(void)      const
+     { return (m_bias_dir == 1) ? m_buy_evidence.score :
+              ((m_bias_dir == -1) ? m_sell_evidence.score :
+               (int)MathMax(m_buy_evidence.score, m_sell_evidence.score)); }
+   string            BiasTier(void)       const { return ATDE_EvidenceTier(BiasScore()); }
    bool              Tradable(void)       const { return m_tradable; }
+   int               EvalDir(void)        const { return m_eval_dir; }
    double            Entry(void)          const { return m_entry; }
    double            Sl(void)             const { return m_sl; }
    double            Tp1(void)            const { return m_tp1; }
@@ -345,7 +393,10 @@ CDirectionEngine::CDirectionEngine(void)
    m_ready    = false;
    m_dir      = AT_SIG_HOLD;
    m_eval_dir = 0;
+   m_bias_dir = 0;
    m_score    = 0;
+   ATDE_ClearEvidence(m_buy_evidence);
+   ATDE_ClearEvidence(m_sell_evidence);
    m_threshold = 88;
    m_vote     = 0;
    m_tradable = false;
@@ -458,27 +509,191 @@ string CDirectionEngine::LaneName(void) const
   }
 
 //+------------------------------------------------------------------+
+//| Score one side independently. The same evidence is evaluated for  |
+//| BUY and SELL so contrary signals lower that side's relative score.|
+//+------------------------------------------------------------------+
+void CDirectionEngine::ScoreSide(const int side, CTFAnalysis *lt, CTFAnalysis *tr,
+                                 const double atr, const double stops_price,
+                                 const double spread_price, const long spread_pts,
+                                 const double spread_limit_pts, const int quote_age_sec,
+                                 SATDirectionEvidence &e)
+  {
+   ATDE_ClearEvidence(e);
+   if((side != 1 && side != -1) || lt == NULL || tr == NULL)
+      return;
+
+   //--- (1) M30 bias: an opposing regime contributes no support here;
+   //--- the opposite side is scored separately and can earn that evidence.
+   int m30dir = a30.regime.Direction();
+   if(m30dir == side)
+     {
+      e.bias = 0.75;
+      if(a30.regime.IsTrend() && MathAbs(a30.regime.Score()) >= 4 &&
+         a30.regime.Efficiency() >= 0.45)
+         e.bias = 1.00;
+      else if(a30.regime.IsPullback())
+         e.bias = 0.90;
+     }
+   else if(m30dir == 0)
+      e.bias = a30.regime.IsRangeExtreme() ? 0.55 : 0.30;
+
+   //--- (2) M15 + lane structure, including recent contrary CHoCH.
+   if(a15.regime.Direction() == side)       e.structure += 0.35;
+   else if(a15.regime.Direction() == 0)    e.structure += 0.15;
+   if(lt.smc.structure_dir == side)         e.structure += 0.25;
+   else if(lt.smc.structure_dir == 0)      e.structure += 0.10;
+   if(lt.smc.bos_dir == side)
+     {
+      if(lt.smc.bars_since_bos <= 10)      e.structure += 0.25;
+      else if(lt.smc.bars_since_bos <= 25) e.structure += 0.12;
+     }
+   if(lt.smc.choch_dir == -side && lt.smc.bars_since_choch <= 15)
+      e.structure -= 0.30;
+   bool stack_up = (lt.ema20 > lt.ema50 && lt.ema50 > lt.ema100);
+   bool stack_dn = (lt.ema20 < lt.ema50 && lt.ema50 < lt.ema100);
+   if((side == 1 && stack_up) || (side == -1 && stack_dn))
+      e.structure += 0.15;
+
+   //--- (3) M5 trigger. Momentum contrary to this side adds no trigger credit.
+   if(side == 1)
+     {
+      if(tr.lrsi > 0.50 && tr.lrsi < 0.85) e.trigger += 0.30;
+      else if(tr.lrsi >= 0.85)             e.trigger += 0.10;
+     }
+   else
+     {
+      if(tr.lrsi < 0.50 && tr.lrsi > 0.15) e.trigger += 0.30;
+      else if(tr.lrsi <= 0.15)             e.trigger += 0.10;
+     }
+   if((side == 1 && tr.close0 > tr.ss) || (side == -1 && tr.close0 < tr.ss))
+      e.trigger += 0.25;
+   if((side == 1 && tr.decy_osc > 0.0) || (side == -1 && tr.decy_osc < 0.0))
+      e.trigger += 0.20;
+   bool conf_bar = (side == 1)
+                   ? (tr.md.Close(0) > tr.md.Open(0) &&
+                      tr.md.Close(0) > tr.md.Close(1))
+                   : (tr.md.Close(0) < tr.md.Open(0) &&
+                      tr.md.Close(0) < tr.md.Close(1));
+   if(conf_bar)
+      e.trigger += 0.25;
+
+   //--- (4) side-specific zones, liquidity sweep and structure break.
+   double zdist = (side == 1) ? lt.smc.zone_buy_dist_atr : lt.smc.zone_sell_dist_atr;
+   int    zkind = (side == 1) ? lt.smc.zone_buy_kind : lt.smc.zone_sell_kind;
+   if(zkind > 0)
+     {
+      if(zdist <= 0.35)      e.zone = 0.75;
+      else if(zdist <= 0.75) e.zone = 0.55;
+      else if(zdist <= 1.50) e.zone = 0.30;
+      else                   e.zone = 0.10;
+     }
+   else
+     {
+      bool near_env = (side == 1)
+                      ? (lt.close0 <= lt.nw_lo + 0.50 * atr)
+                      : (lt.close0 >= lt.nw_up - 0.50 * atr);
+      e.zone = near_env ? 0.45 : 0.20;
+      if(lt.vol.profile_ready && lt.vol.poc_dist_atr <= 0.60)
+         e.zone += 0.15;
+     }
+   if(lt.smc.sweep_bias == side && lt.smc.bars_since_sweep <= 6)
+      e.zone += 0.20;
+   if(lt.smc.bos_dir == side && lt.smc.bars_since_bos <= 10)
+      e.zone += 0.10;
+
+   //--- (5) directional momentum. Slope magnitude is credited only when
+   //--- its sign agrees; the old absolute-value term rewarded both sides.
+   int agree = 0;
+   if(ATDE_Sign(lt.nw_slope) == side)     agree++;
+   if(ATDE_Sign(lt.kalman_slope) == side) agree++;
+   if((side == 1 && lt.decy_osc > 0.0) || (side == -1 && lt.decy_osc < 0.0)) agree++;
+   if((side == 1 && lt.close0 > lt.ss) || (side == -1 && lt.close0 < lt.ss)) agree++;
+   if((side == 1 && lt.lrsi > 0.55) || (side == -1 && lt.lrsi < 0.45)) agree++;
+   e.momentum = (double)agree / 5.0 * 0.70;
+   if(lt.nw_slope * (double)side > 0.0)
+      e.momentum += 0.30 * MathMin(1.0, MathAbs(lt.nw_slope) / 0.15);
+
+   //--- (6) volume agreement. Participation quality is neutral; CVD/VWAP
+   //--- direction is only credited to the side it actually supports.
+   if(lt.vol.cvd_dir == side)
+      e.volume += 0.10 + 0.45 * lt.vol.cvd_strength;
+   else if(lt.vol.cvd_dir == 0)
+      e.volume += 0.20;
+   if(lt.vol.vol_ratio >= 1.10)      e.volume += 0.25;
+   else if(lt.vol.vol_ratio >= 0.90) e.volume += 0.12;
+   if((side == 1 && lt.vol.price_vs_vwap == 1) ||
+      (side == -1 && lt.vol.price_vs_vwap == -1))
+      e.volume += 0.20;
+   if(lt.vol.profile_ready && lt.vol.poc_dist_atr <= 0.50)
+      e.volume += 0.05;
+
+   //--- (7) volatility fitness: symbol conditions, same for both sides.
+   double ratio = lt.atr_ratio;
+   if(ratio >= 0.80 && ratio <= 1.40)      e.fitness = 0.85;
+   else if(ratio > 1.40 && ratio <= 1.60)  e.fitness = 0.50;
+   else if(ratio >= 0.62 && ratio < 0.80)  e.fitness = 0.55;
+   else                                    e.fitness = 0.15;
+   if(lt.eff >= 0.45)      e.fitness += 0.15;
+   else if(lt.eff >= 0.30) e.fitness += 0.08;
+   else                    e.fitness -= 0.10;
+   double cost3 = (stops_price + spread_price) * 3.0;
+   if(atr >= cost3) e.fitness += 0.10;
+   else             e.fitness -= 0.35;
+
+   //--- (8) quote quality: displayed as evidence, but stale quotes and
+   //--- expensive spreads remain separate hard execution gates below.
+   if(spread_limit_pts > 0.0)
+      e.quote = ATMI_Clamp01(1.0 - (double)spread_pts / (spread_limit_pts * 1.30));
+   else
+      e.quote = 0.70;
+   if(quote_age_sec > 30)  e.quote *= 0.50;
+   if(quote_age_sec > 90)  e.quote *= 0.30;
+
+   double w0 = 0.15, w1 = 0.15, w2 = 0.15, w3 = 0.15;
+   double w4 = 0.15, w5 = 0.10, w6 = 0.10, w7 = 0.05;
+   if(lt.regime.IsTrend())
+     { w0 = 0.20; w1 = 0.18; w2 = 0.12; w3 = 0.10; w4 = 0.18; w5 = 0.08; w6 = 0.08; w7 = 0.06; }
+   else if(lt.regime.IsPullback())
+     { w0 = 0.20; w1 = 0.16; w2 = 0.14; w3 = 0.16; w4 = 0.12; w5 = 0.08; w6 = 0.08; w7 = 0.06; }
+   else if(lt.regime.IsRangeExtreme())
+     { w0 = 0.12; w1 = 0.12; w2 = 0.14; w3 = 0.24; w4 = 0.10; w5 = 0.14; w6 = 0.08; w7 = 0.06; }
+
+   double blended = w0 * ATMI_Clamp01(e.bias)      + w1 * ATMI_Clamp01(e.structure) +
+                    w2 * ATMI_Clamp01(e.trigger)   + w3 * ATMI_Clamp01(e.zone)      +
+                    w4 * ATMI_Clamp01(e.momentum)  + w5 * ATMI_Clamp01(e.volume)    +
+                    w6 * ATMI_Clamp01(e.fitness)   + w7 * ATMI_Clamp01(e.quote);
+   e.score = (int)MathRound(blended * 100.0);
+  }
+
+//+------------------------------------------------------------------+
 //| the audit line printed to the Experts log on every new bar        |
 //+------------------------------------------------------------------+
 string CDirectionEngine::Audit(void) const
   {
-   string s = StringFormat("AT3 %s score=%d/%d vote=%d",
-                           LaneName(), m_score, m_threshold, m_vote);
-
-   //--- the parts are always shown (owner report, 14 Oct 2026). While no
-   //--- side has been chosen they describe the provisional side and are
-   //--- labelled PROV - evidence in the log, never a signal.
-   if(m_parts_side == 0)
-      s += " parts[n/a - no side yet]";
-   else
-     {
-      if(m_prov)
-         s += StringFormat(" PROV[%s %d]",
-                           (m_parts_side == 1) ? "BUY" : "SELL", m_parts_score);
-      s += StringFormat(" parts[bias %d struct %d trig %d zone %d mom %d vol %d fit %d quote %d]",
-                        m_p_bias, m_p_struct, m_p_trigger, m_p_zone,
-                        m_p_momentum, m_p_volume, m_p_fitness, m_p_quote);
-     }
+   string bias = (m_bias_dir == 1) ? "BUY" : ((m_bias_dir == -1) ? "SELL" : "MIXED");
+   string tier = (m_bias_dir == 0) ? "mixed" : ATDE_EvidenceTier(BiasScore());
+   string s = StringFormat("AT3 %s vote=%d signalScore=%d/%d bias=%s BUY=%d SELL=%d gap=%d tier=%s",
+                           LaneName(), m_vote, m_score, m_threshold, bias,
+                           m_buy_evidence.score, m_sell_evidence.score,
+                           m_buy_evidence.score - m_sell_evidence.score, tier);
+   s += StringFormat(" BUYparts[bias %d struct %d trig %d zone %d mom %d vol %d fit %d quote %d]",
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.bias) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.structure) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.trigger) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.zone) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.momentum) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.volume) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.fitness) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_buy_evidence.quote) * 100.0));
+   s += StringFormat(" SELLparts[bias %d struct %d trig %d zone %d mom %d vol %d fit %d quote %d]",
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.bias) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.structure) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.trigger) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.zone) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.momentum) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.volume) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.fitness) * 100.0),
+                     (int)MathRound(ATMI_Clamp01(m_sell_evidence.quote) * 100.0));
 
    if(m_dir == AT_SIG_HOLD)
       s += " -> HOLD: " + m_reason;
@@ -541,7 +756,7 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
       m_last_heavy = now;
      }
 
-   m_threshold = profile.ConfidenceThreshold();
+   m_threshold = profile.ScoreThreshold();
    m_digits    = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
 
    CTFAnalysis *lt = LaneTF();
@@ -555,7 +770,14 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
       m_dir      = AT_SIG_HOLD;
       m_tradable = false;
       m_score    = 0;
+      m_eval_dir = 0;
+      m_bias_dir = 0;
+      m_vote     = 0;
+      ATDE_ClearEvidence(m_buy_evidence);
+      ATDE_ClearEvidence(m_sell_evidence);
       m_parts_side = 0; m_parts_score = 0; m_prov = false;
+      m_p_bias = 0; m_p_struct = 0; m_p_trigger = 0; m_p_zone = 0;
+      m_p_momentum = 0; m_p_volume = 0; m_p_fitness = 0; m_p_quote = 0;
       m_veto     = "calibrating";
       m_reason   = "collecting price history";
       m_lane_new_bar = any_new_bar;
@@ -576,8 +798,8 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
    m_veto   = "";
    m_reason = "";
 
-   //=== 1. which direction is even worth scoring? ====================
-   //--- a plain vote of the lane timeframe's own witnesses
+   //=== 1. score BUY and SELL independently before selecting a side ===
+   //--- retain the raw witness vote for diagnostics and as a fallback
    int vote = 0;
    vote += lt.regime.Direction();
    vote += lt.smc.structure_dir;
@@ -591,13 +813,62 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
       vote += lt.smc.bos_dir;
    m_vote = vote;
 
-   int cand = (vote >= 3) ? 1 : ((vote <= -3) ? -1 : 0);
+   ScoreSide(1, lt, tr, atr, stops_price, spread_price, spread_pts,
+             spread_limit_pts, quote_age_sec, m_buy_evidence);
+   ScoreSide(-1, lt, tr, atr, stops_price, spread_price, spread_pts,
+             spread_limit_pts, quote_age_sec, m_sell_evidence);
 
-   //--- keep an existing latch under evaluation so the score can be
+   int evidence_gap = m_buy_evidence.score - m_sell_evidence.score;
+   m_bias_dir = 0;
+   if(evidence_gap >= ATDE_BIAS_MARGIN)       m_bias_dir = 1;
+   else if(evidence_gap <= -ATDE_BIAS_MARGIN) m_bias_dir = -1;
+
+   int vote_cand = (vote >= 3) ? 1 : ((vote <= -3) ? -1 : 0);
+   //--- a material two-sided evidence lead takes priority over the simple
+   //--- vote. Close scores still say MIXED; the old vote remains a fallback.
+   int cand = (m_bias_dir != 0) ? m_bias_dir : vote_cand;
+
+   //--- keep an existing latch under evaluation so its score can be
    //--- watched on the way down (that is what the release band is for)
    int eval_dir = (m_latch_dir != 0) ? m_latch_dir : cand;
+   int dir = eval_dir;
+   m_eval_dir = dir;
+   m_score = (dir == 1) ? m_buy_evidence.score :
+             ((dir == -1) ? m_sell_evidence.score : 0);
 
-   //=== 2. hard gates (a veto means HOLD, whatever the score says) ===
+   //--- expose the bias-side parts while waiting; once a signal is latched,
+   //--- keep the parts aligned with the side being evaluated for execution.
+   m_parts_side = (m_latch_dir != 0) ? m_latch_dir :
+                  ((m_bias_dir != 0) ? m_bias_dir : dir);
+   m_parts_score = 0;
+   m_p_bias = 0; m_p_struct = 0; m_p_trigger = 0; m_p_zone = 0;
+   m_p_momentum = 0; m_p_volume = 0; m_p_fitness = 0; m_p_quote = 0;
+   if(m_parts_side == 1)
+     {
+      m_parts_score = m_buy_evidence.score;
+      m_p_bias     = (int)MathRound(ATMI_Clamp01(m_buy_evidence.bias) * 100.0);
+      m_p_struct   = (int)MathRound(ATMI_Clamp01(m_buy_evidence.structure) * 100.0);
+      m_p_trigger  = (int)MathRound(ATMI_Clamp01(m_buy_evidence.trigger) * 100.0);
+      m_p_zone     = (int)MathRound(ATMI_Clamp01(m_buy_evidence.zone) * 100.0);
+      m_p_momentum = (int)MathRound(ATMI_Clamp01(m_buy_evidence.momentum) * 100.0);
+      m_p_volume   = (int)MathRound(ATMI_Clamp01(m_buy_evidence.volume) * 100.0);
+      m_p_fitness  = (int)MathRound(ATMI_Clamp01(m_buy_evidence.fitness) * 100.0);
+      m_p_quote    = (int)MathRound(ATMI_Clamp01(m_buy_evidence.quote) * 100.0);
+     }
+   else if(m_parts_side == -1)
+     {
+      m_parts_score = m_sell_evidence.score;
+      m_p_bias     = (int)MathRound(ATMI_Clamp01(m_sell_evidence.bias) * 100.0);
+      m_p_struct   = (int)MathRound(ATMI_Clamp01(m_sell_evidence.structure) * 100.0);
+      m_p_trigger  = (int)MathRound(ATMI_Clamp01(m_sell_evidence.trigger) * 100.0);
+      m_p_zone     = (int)MathRound(ATMI_Clamp01(m_sell_evidence.zone) * 100.0);
+      m_p_momentum = (int)MathRound(ATMI_Clamp01(m_sell_evidence.momentum) * 100.0);
+      m_p_volume   = (int)MathRound(ATMI_Clamp01(m_sell_evidence.volume) * 100.0);
+      m_p_fitness  = (int)MathRound(ATMI_Clamp01(m_sell_evidence.fitness) * 100.0);
+      m_p_quote    = (int)MathRound(ATMI_Clamp01(m_sell_evidence.quote) * 100.0);
+     }
+
+   //=== 2. hard trade gates (a veto means no execution, not no bias) ===
    if(eval_dir == 0)
       m_veto = "no clear direction yet";
    else if(!lt.regime.Tradable())
@@ -621,205 +892,6 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
                             (int)spread_pts, spread_limit_pts);
    else if(quote_age_sec > 120)
       m_veto = "no fresh broker quote";
-
-   //=== 3. the eight evidence groups (0..100) ========================
-   double e_bias = 0.0, e_struct = 0.0, e_trig = 0.0, e_zone = 0.0;
-   double e_mom = 0.0, e_vol = 0.0, e_fit = 0.0, e_quote = 0.0;
-   int dir = eval_dir;
-
-   //--- the eight evidence parts are ALWAYS computed (owner report, 14 Oct
-   //--- 2026). When no side has been chosen yet they describe the side the
-   //--- engine would look at first - a range extreme's fade side (the only
-   //--- side RegimeAllows there), otherwise the plain vote's lean - so the
-   //--- log and the panel show real scoring instead of eight zeros.
-   int pdir = dir;
-   if(pdir == 0)
-     {
-      if(lt.regime.IsRangeExtreme())
-         pdir = (lt.regime.Kind() == AT_REGIME_RANGE_BOTTOM) ? 1 : -1;
-      else if(vote > 0) pdir = 1;
-      else if(vote < 0) pdir = -1;
-      else
-        {
-         //--- the plain vote is tied: read the same witnesses with their
-         //--- own graded lean, so the scoring still appears instead of
-         //--- eight zeros. Display only - the decision score stays 0.
-         int lean = 0;
-         if(lt.nw_slope > 0.0)          lean++;
-         else if(lt.nw_slope < 0.0)     lean--;
-         if(lt.kalman_slope > 0.0)      lean++;
-         else if(lt.kalman_slope < 0.0) lean--;
-         if(lt.decy_osc > 0.0)          lean++;
-         else if(lt.decy_osc < 0.0)     lean--;
-         if(lt.close0 > lt.ss)          lean++;
-         else if(lt.close0 < lt.ss)     lean--;
-         if(lt.lrsi > 0.5)              lean++;
-         else if(lt.lrsi < 0.5)         lean--;
-         lean += lt.vol.cvd_dir;
-         lean += lt.smc.structure_dir;
-         lean += (lt.regime.Score() > 0) ? 1 : ((lt.regime.Score() < 0) ? -1 : 0);
-         if(lean > 0)      pdir = 1;
-         else if(lean < 0) pdir = -1;
-        }
-     }
-
-   if(pdir != 0)
-     {
-      //--- (1) M30 bias ------------------------------------------------
-      int m30dir = a30.regime.Direction();
-      if(m30dir == pdir)
-        {
-         e_bias = 0.75;
-         if(a30.regime.IsTrend() && MathAbs(a30.regime.Score()) >= 4 &&
-            a30.regime.Efficiency() >= 0.45)
-            e_bias = 1.00;
-         else if(a30.regime.IsPullback())
-            e_bias = 0.90;
-        }
-      else if(m30dir == 0)
-         e_bias = a30.regime.IsRangeExtreme() ? 0.55 : 0.30;
-
-      //--- (2) M15 structure + lane structure -------------------------
-      if(a15.regime.Direction() == pdir)       e_struct += 0.35;
-      else if(a15.regime.Direction() == 0)    e_struct += 0.15;
-      if(lt.smc.structure_dir == pdir)         e_struct += 0.25;
-      else if(lt.smc.structure_dir == 0)      e_struct += 0.10;
-      if(lt.smc.bos_dir == pdir)
-        {
-         if(lt.smc.bars_since_bos <= 10)      e_struct += 0.25;
-         else if(lt.smc.bars_since_bos <= 25) e_struct += 0.12;
-        }
-      if(lt.smc.choch_dir == -pdir && lt.smc.bars_since_choch <= 15)
-         e_struct -= 0.30;
-      bool stack_up = (lt.ema20 > lt.ema50 && lt.ema50 > lt.ema100);
-      bool stack_dn = (lt.ema20 < lt.ema50 && lt.ema50 < lt.ema100);
-      if((pdir == 1 && stack_up) || (pdir == -1 && stack_dn))
-         e_struct += 0.15;
-
-      //--- (3) M5 trigger (always M5 - it is the timing timeframe) ----
-      if(pdir == 1)
-        {
-         if(tr.lrsi > 0.50 && tr.lrsi < 0.85) e_trig += 0.30;
-         else if(tr.lrsi >= 0.85)             e_trig += 0.10;
-        }
-      else
-        {
-         if(tr.lrsi < 0.50 && tr.lrsi > 0.15) e_trig += 0.30;
-         else if(tr.lrsi <= 0.15)             e_trig += 0.10;
-        }
-      if((pdir == 1 && tr.close0 > tr.ss) || (pdir == -1 && tr.close0 < tr.ss))
-         e_trig += 0.25;
-      if((pdir == 1 && tr.decy_osc > 0.0) || (pdir == -1 && tr.decy_osc < 0.0))
-         e_trig += 0.20;
-      bool conf_bar = (pdir == 1)
-                      ? (tr.md.Close(0) > tr.md.Open(0) &&
-                         tr.md.Close(0) > tr.md.Close(1))
-                      : (tr.md.Close(0) < tr.md.Open(0) &&
-                         tr.md.Close(0) < tr.md.Close(1));
-      if(conf_bar)
-         e_trig += 0.25;
-
-      //--- (4) zone quality (smart money, or the NW envelope) ---------
-      double zdist = (pdir == 1) ? lt.smc.zone_buy_dist_atr : lt.smc.zone_sell_dist_atr;
-      int    zkind = (pdir == 1) ? lt.smc.zone_buy_kind : lt.smc.zone_sell_kind;
-      if(zkind > 0)
-        {
-         if(zdist <= 0.35)      e_zone = 0.75;
-         else if(zdist <= 0.75) e_zone = 0.55;
-         else if(zdist <= 1.50) e_zone = 0.30;
-         else                   e_zone = 0.10;
-        }
-      else
-        {
-         bool near_env = (pdir == 1)
-                         ? (lt.close0 <= lt.nw_lo + 0.50 * atr)
-                         : (lt.close0 >= lt.nw_up - 0.50 * atr);
-         e_zone = near_env ? 0.45 : 0.20;
-         if(lt.vol.profile_ready && lt.vol.poc_dist_atr <= 0.60)
-            e_zone += 0.15;
-        }
-      if(lt.smc.sweep_bias == pdir && lt.smc.bars_since_sweep <= 6)
-         e_zone += 0.20;
-      if(lt.smc.bos_dir == pdir && lt.smc.bars_since_bos <= 10)
-         e_zone += 0.10;
-
-      //--- (5) momentum agreement ------------------------------------
-      int agree = 0;
-      if(ATDE_Sign(lt.nw_slope) == pdir)     agree++;
-      if(ATDE_Sign(lt.kalman_slope) == pdir) agree++;
-      if((pdir == 1 && lt.decy_osc > 0.0) || (pdir == -1 && lt.decy_osc < 0.0)) agree++;
-      if((pdir == 1 && lt.close0 > lt.ss) || (pdir == -1 && lt.close0 < lt.ss)) agree++;
-      if((pdir == 1 && lt.lrsi > 0.55) || (pdir == -1 && lt.lrsi < 0.45)) agree++;
-      e_mom = (double)agree / 5.0 * 0.70;
-      e_mom += 0.30 * MathMin(1.0, MathAbs(lt.nw_slope) / 0.15);
-
-      //--- (6) volume agreement --------------------------------------
-      if(lt.vol.cvd_dir == pdir)
-         e_vol += 0.10 + 0.45 * lt.vol.cvd_strength;
-      else if(lt.vol.cvd_dir == 0)
-         e_vol += 0.20;
-      if(lt.vol.vol_ratio >= 1.10)      e_vol += 0.25;
-      else if(lt.vol.vol_ratio >= 0.90) e_vol += 0.12;
-      if((pdir == 1 && lt.vol.price_vs_vwap == 1) ||
-         (pdir == -1 && lt.vol.price_vs_vwap == -1))
-         e_vol += 0.20;
-      if(lt.vol.profile_ready && lt.vol.poc_dist_atr <= 0.50)
-         e_vol += 0.05;
-
-      //--- (7) volatility fitness ------------------------------------
-      double ratio = lt.atr_ratio;
-      if(ratio >= 0.80 && ratio <= 1.40)      e_fit = 0.85;
-      else if(ratio > 1.40 && ratio <= 1.60)  e_fit = 0.50;
-      else if(ratio >= 0.62 && ratio < 0.80)  e_fit = 0.55;
-      else                                    e_fit = 0.15;
-      if(lt.eff >= 0.45)      e_fit += 0.15;
-      else if(lt.eff >= 0.30) e_fit += 0.08;
-      else                    e_fit -= 0.10;
-      //--- the wiggle must be worth more than the cost of trading it
-      double cost3 = (stops_price + spread_price) * 3.0;
-      if(atr >= cost3) e_fit += 0.10;
-      else             e_fit -= 0.35;
-
-      //--- (8) quote quality -----------------------------------------
-      if(spread_limit_pts > 0.0)
-         e_quote = ATMI_Clamp01(1.0 - (double)spread_pts / (spread_limit_pts * 1.30));
-      else
-         e_quote = 0.70;
-      if(quote_age_sec > 30)  e_quote *= 0.50;
-      if(quote_age_sec > 90)  e_quote *= 0.30;
-     }
-
-   m_p_bias     = (int)MathRound(ATMI_Clamp01(e_bias)   * 100.0);
-   m_p_struct   = (int)MathRound(ATMI_Clamp01(e_struct) * 100.0);
-   m_p_trigger  = (int)MathRound(ATMI_Clamp01(e_trig)   * 100.0);
-   m_p_zone     = (int)MathRound(ATMI_Clamp01(e_zone)   * 100.0);
-   m_p_momentum = (int)MathRound(ATMI_Clamp01(e_mom)    * 100.0);
-   m_p_volume   = (int)MathRound(ATMI_Clamp01(e_vol)    * 100.0);
-   m_p_fitness  = (int)MathRound(ATMI_Clamp01(e_fit)    * 100.0);
-   m_p_quote    = (int)MathRound(ATMI_Clamp01(e_quote)  * 100.0);
-
-   //=== 4. regime-weighted blend =====================================
-   double w0 = 0.15, w1 = 0.15, w2 = 0.15, w3 = 0.15;
-   double w4 = 0.15, w5 = 0.10, w6 = 0.10, w7 = 0.05;
-   if(lt.regime.IsTrend())
-     { w0 = 0.20; w1 = 0.18; w2 = 0.12; w3 = 0.10; w4 = 0.18; w5 = 0.08; w6 = 0.08; w7 = 0.06; }
-   else if(lt.regime.IsPullback())
-     { w0 = 0.20; w1 = 0.16; w2 = 0.14; w3 = 0.16; w4 = 0.12; w5 = 0.08; w6 = 0.08; w7 = 0.06; }
-   else if(lt.regime.IsRangeExtreme())
-     { w0 = 0.12; w1 = 0.12; w2 = 0.14; w3 = 0.24; w4 = 0.10; w5 = 0.14; w6 = 0.08; w7 = 0.06; }
-
-   double blended = w0 * ATMI_Clamp01(e_bias)   + w1 * ATMI_Clamp01(e_struct) +
-                    w2 * ATMI_Clamp01(e_trig)   + w3 * ATMI_Clamp01(e_zone)   +
-                    w4 * ATMI_Clamp01(e_mom)    + w5 * ATMI_Clamp01(e_vol)    +
-                    w6 * ATMI_Clamp01(e_fit)    + w7 * ATMI_Clamp01(e_quote);
-   m_score = (dir == 0) ? 0 : (int)MathRound(blended * 100.0);
-   m_eval_dir = dir;
-
-   //--- what the printed parts describe (display only - the score above
-   //--- stays 0 while no side has been chosen, so nothing can latch on it)
-   m_parts_side  = pdir;
-   m_parts_score = (pdir == 0) ? 0 : (int)MathRound(blended * 100.0);
-   m_prov        = (dir == 0 && pdir != 0);
 
    //=== 5. the real, reachable price plan ============================
    m_entry = 0.0; m_sl = 0.0; m_tp1 = 0.0; m_tp2 = 0.0; m_tp3 = 0.0;
@@ -944,8 +1016,9 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
       if(!gates_ok)                      { release = true; why = m_veto; }
       else if(m_score < m_threshold - ATDE_RELEASE_BAND)
         { release = true; why = StringFormat("score fell to %d (line %d)", m_score, m_threshold); }
-      else if(dir != 0 && cand == -m_latch_dir && MathAbs(vote) >= 3)
-        { release = true; why = "direction flipped against the signal"; }
+      else if(cand == -m_latch_dir &&
+              (MathAbs(vote) >= 3 || MathAbs(evidence_gap) >= 2 * ATDE_BIAS_MARGIN))
+        { release = true; why = "directional evidence flipped against the signal"; }
       else if(LatchAgeSec() > LaneMaxMinutes() * 60)
         { release = true; why = "signal grew too old"; }
 
@@ -970,6 +1043,7 @@ bool CDirectionEngine::Refresh(CSymbolIntelligence &profile,
       m_tradable = gates_ok && (m_entry > 0.0) && (m_sl > 0.0) && (m_tp3 > 0.0);
       m_reason   = StringFormat("latched, score %d vs %d needed", m_latch_score, m_threshold);
      }
+   m_prov = (m_dir == AT_SIG_HOLD && m_bias_dir != 0);
 
    return m_ready;
   }

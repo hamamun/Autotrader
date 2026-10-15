@@ -14,7 +14,7 @@
 //| The numbers come from the broker's own deal history, so they      |
 //| survive restarts, reconnections and re-attaching the EA.          |
 //| Every signal and every order action is also appended to           |
-//| MQL5\Files\Autotrader_log.csv for later auditing of the 98%.      |
+//| MQL5\Files\Autotrader_log.csv for research-target auditing.       |
 //+------------------------------------------------------------------+
 #ifndef AUTOTRADER_STATS_KEEPER_MQH
 #define AUTOTRADER_STATS_KEEPER_MQH
@@ -38,6 +38,10 @@ private:
    //--- grouping of closing deals per position (one trade = one result)
    ulong    g_pid[];
    double   g_net[];
+   double   g_gross[];
+   double   g_swap[];
+   double   g_commission[];
+   double   g_fee[];
    datetime g_last[];
    int      g_n;
    datetime g_open_t[];   // when the trade opened (first entry deal)
@@ -54,6 +58,7 @@ private:
    int      FindGroup(const ulong pid);
    void     AddGroup(const ulong pid);
    bool     WriteHeader(void);
+   bool     PrepareLog(void);
    bool     IsLogged(const ulong pid) const;
    void     LogTrade(const int idx);
 
@@ -62,7 +67,15 @@ public:
    bool     Init(const string symbol, const ulong magic, const string lane_tag);
    //--- a new signal was published (latched) -> count it and log it
    void     OnSignal(const int dir, const int score, const int threshold,
-                     const string regime, const string detail);
+                     const string regime, const double entry, const double sl,
+                     const double tp1, const double tp2, const double tp3,
+                     const string detail);
+   //--- one machine-readable two-sided assessment per closed lane bar
+   void     OnAssessment(const int bias_dir, const int buy_score, const int sell_score,
+                        const int threshold, const string regime,
+                        const double entry, const double sl, const double tp1,
+                        const double tp2, const double tp3, const long spread_pts,
+                        const bool eligible, const string detail);
    //--- general audit line
    void     Log(const string event, const string detail);
    //--- rescan the broker history (throttled internally)
@@ -154,19 +167,24 @@ bool CStatsKeeper::WriteHeader(void)
   }
 
 //+------------------------------------------------------------------+
-void CStatsKeeper::Log(const string event, const string detail)
+bool CStatsKeeper::PrepareLog(void)
   {
-   //--- rotate: the counters come from the broker history, never from
-   //--- this file, so an oversized log is simply started again
    if(FileIsExist(ATST_LOG_FILE))
      {
       long sz = FileGetInteger(ATST_LOG_FILE, FILE_SIZE);
       if(sz > ATST_LOG_MAX_BYTES)
-        {
          FileDelete(ATST_LOG_FILE);
-         WriteHeader();
-        }
      }
+   if(!FileIsExist(ATST_LOG_FILE))
+      return WriteHeader();
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+void CStatsKeeper::Log(const string event, const string detail)
+  {
+   if(!PrepareLog())
+      return;
 
    int h = FileOpen(ATST_LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_SHARE_READ, ',');
    if(h == INVALID_HANDLE)
@@ -184,7 +202,9 @@ void CStatsKeeper::Log(const string event, const string detail)
 
 //+------------------------------------------------------------------+
 void CStatsKeeper::OnSignal(const int dir, const int score, const int threshold,
-                            const string regime, const string detail)
+                            const string regime, const double entry, const double sl,
+                            const double tp1, const double tp2, const double tp3,
+                            const string detail)
   {
    //--- a new day? reset the daily signal counter handle
    int dk = DayKey();
@@ -201,23 +221,60 @@ void CStatsKeeper::OnSignal(const int dir, const int score, const int threshold,
    GlobalVariableSet(g_all, (double)m_sig_all);
    GlobalVariableSet(g_day, (double)m_sig_today);
 
+   if(!PrepareLog())
+      return;
    int h = FileOpen(ATST_LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_SHARE_READ, ',');
-   if(h != INVALID_HANDLE)
-     {
-      FileSeek(h, 0, SEEK_END);
-      int d = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
-      string dir_s = (dir == 1) ? "BUY" : ((dir == 2) ? "SELL" : "HOLD");
-      FileWrite(h,
-                TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-                m_symbol, m_lane_tag, "SIGNAL", dir_s, score, threshold,
-                ATST_Safe(regime),
-                DoubleToString(SymbolInfoDouble(m_symbol, SYMBOL_BID), d),
-                DoubleToString(0.0, d), DoubleToString(0.0, d),
-                DoubleToString(0.0, d), DoubleToString(0.0, d),
-                DoubleToString(0.0, d), DoubleToString(0.0, 2),
-                ATST_Safe(detail));
-      FileClose(h);
-     }
+   if(h == INVALID_HANDLE)
+      return;
+   FileSeek(h, 0, SEEK_END);
+   int d = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+   string dir_s = (dir == 1) ? "BUY" : ((dir == 2) ? "SELL" : "HOLD");
+   FileWrite(h,
+             TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+             m_symbol, m_lane_tag, "SIGNAL", dir_s, score, threshold,
+             ATST_Safe(regime),
+             DoubleToString(SymbolInfoDouble(m_symbol, SYMBOL_BID), d),
+             DoubleToString(entry, d), DoubleToString(sl, d),
+             DoubleToString(tp1, d), DoubleToString(tp2, d),
+             DoubleToString(tp3, d), "-",
+             ATST_Safe(detail));
+   FileClose(h);
+  }
+
+//+------------------------------------------------------------------+
+//| Every closed lane bar is retained for side-by-side validation.    |
+//+------------------------------------------------------------------+
+void CStatsKeeper::OnAssessment(const int bias_dir, const int buy_score,
+                                const int sell_score, const int threshold,
+                                const string regime, const double entry,
+                                const double sl, const double tp1,
+                                const double tp2, const double tp3,
+                                const long spread_pts, const bool eligible,
+                                const string detail)
+  {
+   if(!PrepareLog())
+      return;
+   int h = FileOpen(ATST_LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_SHARE_READ, ',');
+   if(h == INVALID_HANDLE)
+      return;
+   FileSeek(h, 0, SEEK_END);
+   int d = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+   string dir_s = (bias_dir == 1) ? "BUY" : ((bias_dir == -1) ? "SELL" : "MIXED");
+   int selected = (bias_dir == 1) ? buy_score :
+                  ((bias_dir == -1) ? sell_score : (int)MathMax(buy_score, sell_score));
+   string meta = StringFormat("buy=%d;sell=%d;gap=%d;spread_pts=%d;auto_trade_eligible=%s;",
+                              buy_score, sell_score, buy_score - sell_score,
+                              (int)spread_pts, (eligible ? "true" : "false"));
+   FileWrite(h,
+             TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
+             m_symbol, m_lane_tag, "ASSESS", dir_s, selected, threshold,
+             ATST_Safe(regime),
+             DoubleToString(SymbolInfoDouble(m_symbol, SYMBOL_BID), d),
+             DoubleToString(entry, d), DoubleToString(sl, d),
+             DoubleToString(tp1, d), DoubleToString(tp2, d),
+             DoubleToString(tp3, d), "-",
+             ATST_Safe(meta + detail));
+   FileClose(h);
   }
 
 //+------------------------------------------------------------------+
@@ -234,15 +291,23 @@ void CStatsKeeper::AddGroup(const ulong pid)
    g_n++;
    ArrayResize(g_pid, g_n);
    ArrayResize(g_net, g_n);
+   ArrayResize(g_gross, g_n);
+   ArrayResize(g_swap, g_n);
+   ArrayResize(g_commission, g_n);
+   ArrayResize(g_fee, g_n);
    ArrayResize(g_last, g_n);
    ArrayResize(g_open_t, g_n);
    ArrayResize(g_dir, g_n);
    ArrayResize(g_entry, g_n);
    ArrayResize(g_vol, g_n);
    ArrayResize(g_live, g_n);
-   g_pid[g_n - 1]    = pid;
-   g_net[g_n - 1]    = 0.0;
-   g_last[g_n - 1]   = 0;
+   g_pid[g_n - 1]        = pid;
+   g_net[g_n - 1]        = 0.0;
+   g_gross[g_n - 1]      = 0.0;
+   g_swap[g_n - 1]       = 0.0;
+   g_commission[g_n - 1] = 0.0;
+   g_fee[g_n - 1]        = 0.0;
+   g_last[g_n - 1]       = 0;
    g_open_t[g_n - 1] = 0;
    g_dir[g_n - 1]    = 0;
    g_entry[g_n - 1]  = 0.0;
@@ -272,10 +337,15 @@ void CStatsKeeper::LogTrade(const int idx)
    double net = g_net[idx];
    string res = (MathAbs(net) < 0.005) ? "BE" : ((net > 0) ? "WIN" : "LOSS");
    int minutes = (int)((g_last[idx] - g_open_t[idx]) / 60);
-   string detail = StringFormat("result=%s;net=%.2f;open=%s;minutes=%d;lots=%.2f",
-                                res, net, TimeToString(g_open_t[idx], TIME_DATE | TIME_SECONDS),
+   string detail = StringFormat("result=%s;net=%.2f;gross=%.2f;swap=%.2f;commission=%.2f;fee=%.2f;position_id=%s;open=%s;minutes=%d;lots=%.2f",
+                                res, net, g_gross[idx], g_swap[idx],
+                                g_commission[idx], g_fee[idx],
+                                IntegerToString((long)g_pid[idx]),
+                                TimeToString(g_open_t[idx], TIME_DATE | TIME_SECONDS),
                                 minutes, g_vol[idx]);
 
+   if(!PrepareLog())
+      return;
    int h = FileOpen(ATST_LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_SHARE_READ, ',');
    if(h == INVALID_HANDLE)
       return;
@@ -284,11 +354,10 @@ void CStatsKeeper::LogTrade(const int idx)
    FileWrite(h,
              TimeToString(g_last[idx], TIME_DATE | TIME_SECONDS),
              m_symbol, m_lane_tag, "TRADE", (g_dir[idx] == 1) ? "BUY" : "SELL",
-             "-", "-", "-",
-             DoubleToString(g_entry[idx], d),
              "-", "-", "-", "-",
+             DoubleToString(g_entry[idx], d), "-", "-", "-", "-",
              DoubleToString(g_vol[idx], 2),
-             detail);
+             ATST_Safe(detail));
    FileClose(h);
   }
 
@@ -318,6 +387,10 @@ bool CStatsKeeper::Scan(const bool force)
    g_n = 0;
    ArrayResize(g_pid, 0);
    ArrayResize(g_net, 0);
+   ArrayResize(g_gross, 0);
+   ArrayResize(g_swap, 0);
+   ArrayResize(g_commission, 0);
+   ArrayResize(g_fee, 0);
    ArrayResize(g_last, 0);
 
    MqlDateTime d0;
@@ -339,41 +412,41 @@ bool CStatsKeeper::Scan(const bool force)
       ulong pid = (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID);
       datetime t = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
 
-      //--- the opening deal gives the trade's start, direction and price
-      if(entry == DEAL_ENTRY_IN)
-        {
-         int k = FindGroup(pid);
-         if(k < 0)
-           {
-            AddGroup(pid);
-            k = g_n - 1;
-           }
-         if(g_open_t[k] == 0 || t < g_open_t[k])
-           {
-            g_open_t[k] = t;
-            g_dir[k]    = (HistoryDealGetInteger(ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? 1 : 2;
-            g_entry[k]  = HistoryDealGetDouble(ticket, DEAL_PRICE);
-           }
-         g_vol[k] += HistoryDealGetDouble(ticket, DEAL_VOLUME);
-         continue;
-        }
-      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT)
-         continue;
-
-      double net = HistoryDealGetDouble(ticket, DEAL_PROFIT) +
-                   HistoryDealGetDouble(ticket, DEAL_SWAP) +
-                   HistoryDealGetDouble(ticket, DEAL_COMMISSION);
-
       int idx = FindGroup(pid);
       if(idx < 0)
         {
          AddGroup(pid);
          idx = g_n - 1;
         }
-      g_net[idx] += net;
-      if(t > g_last[idx])
-         g_last[idx] = t;
+
+      //--- the opening deal gives the trade's start, direction and price.
+      //--- Its commission/fee is still included below in the full net cost.
+      if(entry == DEAL_ENTRY_IN)
+        {
+         if(g_open_t[idx] == 0 || t < g_open_t[idx])
+           {
+            g_open_t[idx] = t;
+            g_dir[idx]    = (HistoryDealGetInteger(ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? 1 : 2;
+            g_entry[idx]  = HistoryDealGetDouble(ticket, DEAL_PRICE);
+           }
+         g_vol[idx] += HistoryDealGetDouble(ticket, DEAL_VOLUME);
+        }
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+      double swap = HistoryDealGetDouble(ticket, DEAL_SWAP);
+      double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      double fee = HistoryDealGetDouble(ticket, DEAL_FEE);
+      g_gross[idx] += profit;
+      g_swap[idx] += swap;
+      g_commission[idx] += commission;
+      g_fee[idx] += fee;
+      g_net[idx] += profit + swap + commission + fee;
+
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT)
+         if(t > g_last[idx])
+            g_last[idx] = t;
      }
+
 
    //--- a trade that still has an open position is NOT finished yet:
    //--- its first partial may be banked, but it must not count as a
