@@ -186,7 +186,7 @@ class AdaptiveTrailPolicyTests(unittest.TestCase):
         trail_call = engine.index("ManageTrailingStop(i,ctx,mark,bid,ask);", manage)
         tp1_branch = engine.index("//--- TP1:", trail_call)
         self.assertLess(trail_call, tp1_branch)
-        self.assertIn("if(progress_r<arm || floating<=0.0)", engine)
+        self.assertIn("if(!st[idx].tp1_hit && (progress_r<arm || floating<=0.0))", engine)
         self.assertIn("NormStopPrice(MathMax(sl,floor),1)", engine)
         self.assertIn("NormStopPrice(MathMin(sl,floor),-1)", engine)
         self.assertIn("sl<=0.0", engine)
