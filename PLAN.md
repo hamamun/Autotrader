@@ -2,15 +2,16 @@
 
 > Status: Phase 1 (interface) built 12 Oct 2026; Phase 2 (Symbol Intelligence
 > + Regime engine) built 13 Oct 2026; **Phases 3–6 (direction engine, trade
-> engine, safety layer, auto-execution + scoreboard) built 14 Oct 2026.**
-> The EA implements automatic MT5 execution and now scores BUY and SELL
-> independently for a visible directional bias. Display tiers are evidence
-> indices, not probabilities. The 98% motto is an unverified research target;
-> no Strategy Tester, walk-forward, or demo-forward results are established here.
-> Keep it on **demo** until native compilation and independent validation pass.
+> engine, safety layer, auto-execution + scoreboard) built 14 Oct 2026. Phase 8
+> (adaptive trailing stop) is now implemented in source.** The EA implements
+> automatic MT5 execution and scores BUY and SELL independently for a visible
+> directional bias. Display tiers are evidence indices, not probabilities. The
+> 98% motto is an unverified research target; no Strategy Tester, walk-forward,
+> or demo-forward results are established here. Keep it on **demo** until native
+> compilation and independent validation pass.
 > Note: the code cannot be compiled inside this workspace (no MetaEditor), so
 > native compilation and all MT5 validation remain to be run; `tools/` holds
-> three Python development checkers (see section 6B.4).
+> four Python development checkers (see section 6B.4).
 > **14 Oct 2026 — first compile feedback (owner):** 17 errors, all from four
 > names — `ORDER_PRICE_SL` / `ORDER_PRICE_TP` (the pending-order stop and
 > target are `ORDER_SL` / `ORDER_TP`), `TRADE_RETCODE_TRADE_TIMEOUT` (it is
@@ -40,14 +41,20 @@ Worked example (how it looks in practice):
 Setup: BUY on XAUUSDm, Entry 2544.00, risk 1% (= USD 10) at Stop Loss.
 TP ladder (60/80/100% of computed target D = 7 points):
 TP1 = 2547.00 (close 50% of lot), TP2 = 2549.00 (close 30%), TP3 = 2551.00 (close 20%).
-After TP1 → Stop Loss is moved to Entry (break-even) — the trade can no longer lose.
+After TP1, the manager arms cost-aware profit protection if broker stop/freeze
+constraints allow it; a previously placed adaptive trail is never loosened. M5
+can arm before TP1. Neither a stop price nor a trigger guarantees the eventual
+fill or a nonnegative net result through gaps, slippage, fees or broker rejection.
 
-| Case | What happens | Result | Counter |
-|------|--------------|--------|---------|
-| 1 | TP1 (+3.5), TP2 (+3.0), TP3 (+2.4) all hit | **+USD 8.90 profit** | **Win +1** |
-| 2 | TP1 hit (+3.5), then price comes back, rest closed at Entry (+0) | **+USD 3.50 profit** | **Win +1** |
+The arithmetic below illustrates the owner's counter rule only; it excludes
+spread, commission, fees, swap, slippage and gaps, and is not a stop-fill promise.
+
+| Case | Simplified example | Result | Counter |
+|------|--------------------|--------|---------|
+| 1 | TP1 (+3.5), TP2 (+3.0), TP3 (+2.4) all hit | **+USD 8.90** | **Win +1** |
+| 2 | TP1 hit (+3.5), rest exits at the assumed Entry price (+0) | **+USD 3.50** | **Win +1** |
 | 3 | Price goes straight to Stop Loss | **−USD 10.00** | **Loss +1** |
-| 4 | No TP hit, SL already at break-even, trade closed at Entry | **USD 0.00** | **BE +1** (neither Win nor Loss) |
+| 4 | No TP hit; simplified exit exactly at Entry | **USD 0.00** | **BE +1** (neither Win nor Loss) |
 
 - **Win** = closed at **any positive value** (owner's rule).
 - **Loss** = closed at **any negative value** (owner's rule).
@@ -56,27 +63,34 @@ After TP1 → Stop Loss is moved to Entry (break-even) — the trade can no long
 
 ---
 
-## 1B. Break-Even — what it means and what it does (owner asked)
+## 1B. Break-even and adaptive profit protection
 
-**Meaning in one line: moving the Stop Loss up to the Entry price.**
+**Textbook break-even** means moving the stop to Entry. The live manager uses a
+more conservative, cost-aware floor once a trade has earned enough room:
 
-What it does, with the same example (BUY @ 2544.00, SL 2524.80, TP1 2547.00):
+- BUY floor = Entry plus the greater of current spread or two points, plus an
+  estimate of round-turn commission/fees and any negative swap converted to
+  price distance. SELL uses the mirrored floor below Entry.
+- The floor is always on the profitable side of Entry. The manager will not
+  submit a trailing stop on the losing side; a broker stop/freeze distance can
+  delay an update until there is enough room.
+- The adaptive trail does **not** wait for TP1 on M5. Its base activation is
+  +0.45R on M5, +0.65R on M15 and +0.85R on M30, adjusted by changing directional
+  evidence and market state. It begins following the best price after a further
+  progress threshold, with an ATR-sized gap adjusted for trend/chop/volatility
+  and fresh swing structure.
+- TP1 still closes 50% and arms the same protection. It cannot pull a better
+  pre-TP1 stop backward. TP2/TP3 retain their existing partial-close ladder.
 
-1. Trade opens. Risk = 10 points (SL 2524.80). If wrong now → −USD 10.
-2. Price rises and hits TP1 (2547.00). We bank 50% of the lot = **+USD 3.50 locked.**
-3. Now we move the Stop Loss from 2524.80 **up to 2544.00 = the Entry price → "break-even".**
-4. From this moment the worst case is: price falls back, rest of the lot exits at
-   2544.00 = USD 0. Total result of the trade = +USD 3.50 → **still a Win.**
-   The best case: price keeps rising → TP2, TP3 → bigger Win.
+This reduces exposure after a favorable move; it does **not** promise a positive
+realized result. Gaps, slippage, changing spread/costs, broker rejection, or
+execution at a different price can make the final result negative. The simple
+counter examples above intentionally omit those costs.
 
-**Why it is essential for the 98% motto:** after break-even, a trade **can never
-turn into a Loss** (except broker slippage, which we guard against). It converts
-"maybe a loss" into "small win or zero". This single mechanism does more for
-the success rate than any indicator.
-
-Panel life-cycle of the SL (visible in LIVE TRADING panel):
-`Stop Loss: 2524.81 (initial)` → after TP1 → `Stop Loss: 2544.31 (moved to Entry)`.
-(Trailing stop — the next step, phase 2 — keeps moving it further into profit later.)
+Panel life-cycle: the LIVE TRADING panel shows the current broker-side SL and
+reports whether the trail is waiting, protected above/below Entry, or following
+price. The exact stop price is always visible; neither the panel nor a stop
+trigger guarantees the eventual execution price.
 
 ---
 
@@ -84,12 +98,12 @@ Panel life-cycle of the SL (visible in LIVE TRADING panel):
 
 | # | Decision |
 |---|----------|
-| 1 | Pure MQL5. No Python, no training, no waiting. |
+| 1 | **EA runtime is pure MQL5** (no Python, DLL, training or external service); Python scripts in `tools/` are development-only checks and are never copied into MT5. |
 | 2 | Any **symbol**; chart **timeframe must be M5, M15 or M30** (see 4.4). |
 | 3 | Zero inputs except one: **AutoTrading ON/OFF**. Everything else self-configures. |
 | 4 | **No session blocking.** Trade whenever suitable conditions exist. Safety freezes only (news shock, quote failure, spread explosion, weekend gaps). |
 | 5 | Fully automatic direction display AND fully automatic trading. |
-| 6 | **TP ladder (owner's idea):** computed TP = D → TP1 = 60%·D, TP2 = 80%·D, TP3 = 100%·D. Partial close 50% / 30% / 20%. After TP1 → break-even. Trailing stop = later phase. |
+| 6 | **TP ladder (owner's idea):** computed TP = D → TP1 = 60%·D, TP2 = 80%·D, TP3 = 100%·D. Partial close 50% / 30% / remainder. An adaptive, cost-aware non-loss trail may arm before TP1 (M5 does not wait for TP1); TP1 also arms protection without loosening a better stop. Stops obey broker stop/freeze limits and do not guarantee fills or net P/L. |
 | 7 | Interface: same information and look as owner's screenshot, **title = "Autotrader V1.0"**. |
 | 8 | Indicators: 2026-modern stack (see section 5). |
 | 9 | Two display states: **SIGNAL view** (no open order) and **LIVE TRADING panel** (appears when an order is placed). TP-ladder detail lives in the LIVE TRADING panel. |
@@ -175,9 +189,9 @@ Header row is the key: **"LIVE TRADING"**.
 │ Order #84521 | BUY 0.10 lot | opened 14:32                 │
 │ Entry: 2544.31 → Now: 2551.20  (floating +USD 6.89)        │
 ├───────────────────────────────────────────────────────────┤
-│ Stop Loss : 2544.31  (started 2524.81 → moved to Entry)    │
-│ Break-Even: LOCKED                                        │
-│ Trail Stop: OFF (phase 2)                                 │
+│ Stop Loss : 2545.12  (initial → non-loss trail)           │
+│ Break-Even: LOCKED (non-loss trail)                       │
+│ Trail Stop: FOLLOWING price with adaptive ATR gap        │
 ├───────────────────────────────────────────────────────────┤
 │ TP1 2547.31 (60%) : ✓ HIT 14:51 — closed 50% of lot        │
 │ TP2 2549.31 (80%) : pending — 68% progress to target       │
@@ -193,23 +207,24 @@ Row spec:
 |-----|---------|
 | Order | ticket #, direction, lot size, open time |
 | Mark | Entry → current price, floating P/L in USD (and pts) |
-| **Stop Loss** | **the LIVE protective price — always visible. Shows current SL and its journey: `2524.81 (initial)` → `2544.31 (moved to Entry)` → later `trailing @ price`** |
-| Break-Even | mechanism state: `not armed` → `ARMED (after TP1)` → `LOCKED` |
-| Trail Stop | `OFF (later phase)` now; Phase 8: `ACTIVE — trailing @ price` |
+| **Stop Loss** | **the LIVE broker-side protective price — always visible; initial stop → cost-aware non-loss floor → adaptive trail** |
+| Break-Even | mechanism state: `not armed` → `ARMED (trail update pending)` → `LOCKED (non-loss trail)` |
+| Trail Stop | live state: waiting for profit / armed / protected / following price, with the current SL and reason |
 | TP1/TP2/TP3 | ladder price + % of D, live status: `✓ HIT time — closed N%` / `pending — NN% progress` / `skipped (manual)` |
-| STATUS | what the manager is doing: running to TP1 / moved SL to Entry / closed for time / closing… |
+| STATUS | what the manager is doing: waiting for a profitable move / trail protecting before TP1 / following / managing TP ladder / closed for time… |
 
 Note: the MAIN panel's "Stop Loss" row = the **planned** SL of the current signal.
-The LIVE panel's "Stop Loss" row = the **live** SL of the open order (it changes:
-initial → Entry → trailing). Both are always on screen.
+The LIVE panel's "Stop Loss" row = the **live broker-side** SL of the open order
+(it may ratchet from its initial level to a cost-aware floor and then trail). Both
+are always on screen. A displayed stop is not a guarantee of fill price or net profit.
 
 This is where the owner's TP-ladder idea becomes visible and auditable in real time.
 
-**Built (Phase 4):** this panel is no longer a preview. It appears only while a
-real position or a real pending entry exists (magic number = ours), shows the
-real ticket, the real lot, the real stop and its journey (`initial` → `moved to
-Entry`), the real ladder state per level (`✓ HIT 14:51 — closed 50% of lot`,
-`pending — 68% progress to target`), and what the manager is doing right now.
+**Built in source (Phases 4 + 8):** this panel appears only while a real position
+or pending entry exists (magic number = ours), shows the real ticket, lot,
+broker-side stop and its current adaptive trail state, the real ladder state per
+level (`✓ HIT 14:51 — closed 50% of lot`, `pending — 68% progress to target`),
+and what the manager is doing. Native MetaEditor/MT5 validation remains required.
 
 ### 3.4 Incompatible chart behavior (owner rule)
 
@@ -398,19 +413,28 @@ Latched signals retain hysteresis (release below threshold − 8, veto, strong
 direction reversal, or age) to limit flicker. Every closed lane bar records both
 side scores, evidence parts, spread, plan levels, and the wait/block reason.
 
-### E. Trade Management Engine (feeds the LIVE TRADING panel) — BUILT (Phase 4, `TradeEngine.mqh`)
+### E. Trade Management Engine (feeds the LIVE TRADING panel) — implemented in source (Phases 4 + 8, `TradeEngine.mqh`)
 - Entry: limit at zone edge or confirmation close.
 - SL: structural level + ATR buffer; if price is in "open space" (e.g. near
   all-time high) → volatility SL (ATR-based); if even that is absurd → no trade.
   **Hard broker-side SL on every order. Never trade without it.**
-- TP ladder: TP1 60% / TP2 80% / TP3 100%, partial close 50/30/20,
-  SL → Entry after TP1 (break-even), trailing after TP2 (phase 2).
+- TP ladder: TP1 60% / TP2 80% / TP3 100%, partial close 50/30/remainder.
+  TP1 arms cost-aware profit protection without loosening any better stop.
+- Adaptive trail: consumes the active M5/M15/M30 context, ATR ratio, efficiency,
+  choppiness/volatility, directional score change, CHoCH and recent swing
+  structure. M5 can arm at +0.45R (evidence/regime adjusted) before TP1; M15/M30
+  use wider base thresholds. Following uses a timeframe- and regime-adjusted ATR
+  gap, then ratchets only toward profit. Every submitted trail level is clamped
+  to the profitable side of Entry and the cost floor. Broker stop/freeze rules
+  can delay placement, leaving the existing broker SL in place while the panel
+  reports the pending update. Stops cannot guarantee fills or nonnegative net P/L.
 - Time exit if trade stalls beyond Expected Duration.
 - Pending entries are revalidated against the current signal and safety state;
   their maximum age is three chart bars, bounded by expected duration with a
   10-minute minimum. Broker-specified expiry is used where supported; a local
   timer deletes stale GTC orders otherwise.
-- State survives restart / reconnection (position and pending-age state restored).
+- Position, TP ladder, and trailing best-price/current-stop state survive
+  restart/reconnection through broker data plus per-ticket terminal globals.
 
 **As built (Phase 4):** lot size = equity × risk dial ÷ (stop distance valued in
 account money), normalised to the broker's volume step and re-checked against
@@ -421,14 +445,15 @@ The stop is structural + 0.25 ATR when a usable swing sits 0.55–3.0 ATR away,
 else the volatility stop (`sl_mult` × ATR), always ≥ the broker stops level and
 the spread, and the trade is refused if the stop would exceed 3.5 ATR or 3% of
 price. TP3 is set broker-side at open (so the target survives even if the EA
-dies), TP1/TP2 partials are sent by the EA, break-even moves the stop to Entry
-the moment TP1 banks, and a trade that never reaches TP1 within 1.5× its
-expected duration is closed for time. Protection is re-checked and repaired on
-every pass (at most once per 5 s, so a refusing broker is never hammered).
-Restore reads the broker's own position/order data plus terminal global
-variables per ticket (starting volume, expected duration, pending TTL); if those
-are gone the ladder state is inferred from the remaining volume and whether the
-stop already sits at Entry.
+dies), and the EA manages TP1/TP2 partials plus the time exit. At TP1 it arms
+a stop at/above the cost-aware floor for BUY (at/below for SELL), subject to
+broker stop/freeze rules; any existing better trail is retained. Adaptive trail
+activation and ATR distance use the active timeframe, regime, volatility,
+evidence changes and recent structure; the M5 path is independent of TP1.
+Protection is re-checked/repaired without loosening a profit-locked stop. State
+restore includes TP completion flags, best price, initial risk, cost buffer and
+last stop, in addition to starting volume, expected duration and pending TTL.
+These are source-level claims pending native compilation and MT5 execution tests.
 
 ### F. Risk & Safety Manager — BUILT (Phase 5, `SafetyManager.mqh`)
 Risk % per trade (auto, ~1% baseline), auto lot size, max daily loss stand-down
@@ -490,12 +515,12 @@ later validation; it does not train the direction model or prove performance.
 | 1 | MAIN + LIVE TRADING panels, exact look, drag + auto-size, live quotes, sample states (incl. incompatible chart view) | **BUILT** — in `MQL5/`. Preview cycles BUY→HOLD→SELL every ~20s. Look revised 13 Oct 2026 (soft/dark-grey, 12/14pt, drag + width fixes, decision #12) |
 | 2 | Symbol Intelligence + Regime Engine | **BUILT** 13 Oct 2026 — `SymbolIntelligence.mqh` + `RegimeEngine.mqh`; Regime row live with the expanded labels (3.5), profile dials auto-set (3.6). Signals still preview until Phase 3 |
 | 3 | Two-sided direction engine (M30→M15→M5) + evidence tiers | **Implemented; native compile and MT5 validation still required** |
-| 4 | Trade engine: entry rules + SL logic + TP ladder + break-even + management (LIVE panel goes live-live) | **BUILT 14 Oct 2026** — `TradeEngine.mqh`. The owner's 60/80/100 ladder with 50/30/20 partials, break-even after TP1, time exit, restart restore. The LIVE TRADING panel is no longer a preview: it shows the real ticket |
-| 5 | Safety layer: news, spread, daily loss, restart-restore | **BUILT 14 Oct 2026** — `SafetyManager.mqh` (7 guards, see 4F) + restore inside `TradeEngine.mqh` |
+| 4 | Trade engine: entry rules + SL logic + TP ladder + break-even + management (LIVE panel) | **BUILT 14 Oct 2026** — `TradeEngine.mqh`; ladder, partials, time exit and restoration |
+| 5 | Safety layer: news, spread, daily loss, restart-restore | **BUILT 14 Oct 2026** — `SafetyManager.mqh` (7 guards) + restore inside `TradeEngine.mqh` |
 | 6 | Auto-execution + Win/Loss/BE logging + counters | **Implemented; decision/outcome audit and pending freshness extended** |
-| 7 | Tester, walk-forward, PBO/CPCV/Deflated Sharpe, permutation test, demo forward — see 6C | **Validation scripts/plan exist; results not run or established** |
+| 7 | Tester, walk-forward, PBO/CPCV/Deflated Sharpe, permutation test, demo forward — see 6C | **Validation plan/scripts exist; results not run or established** |
+| 8 | Adaptive M5/M15/M30 trailing stop, cost-aware floor, restart state and LIVE-panel status | **Implemented in source; lint and synthetic checks pass; native MetaEditor/MT5 validation required** |
 | 9 | Fine-tuning (only if Phase 7 fails; then re-run Phase 7) | later |
-| 8 | Trailing stop (owner: later) | after the core is proven |
 
 The next validation step is native MetaEditor compilation, then Strategy Tester
 and demo forward checks on M5/M15/M30. Do not interpret a successful compile or
@@ -503,7 +528,7 @@ synthetic arithmetic checks as evidence of profitability or real-money readiness
 
 ---
 
-## 6B. Phase 3–6 as built — the file map and the judge's weights
+## 6B. Phases 3–6 + 8 as implemented — the file map and the judge's weights
 
 ### 6B.1 File map (all pure MQL5, no DLL, no Python, no external data)
 
@@ -520,7 +545,7 @@ synthetic arithmetic checks as evidence of profitability or real-money readiness
 | `Include/Autotrader/DirectionEngine.mqh` | Phase 3 | the judge: three timeframes, 8 evidence groups, gates, latch, real Entry/SL/TP |
 | `Include/Autotrader/SafetyManager.mqh` | Phase 5 | the seven freeze guards |
 | `Include/Autotrader/StatsKeeper.mqh` | Phase 6 | Win/Loss/BE scoreboard + CSV audit trail |
-| `Include/Autotrader/TradeEngine.mqh` | Phase 4 | lots, orders, ladder, break-even, time exit, protection repair, restore |
+| `Include/Autotrader/TradeEngine.mqh` | Phases 4 + 8 | lots, orders, ladder, adaptive trail, cost-aware floor, protection repair, restart restore |
 
 ### 6B.2 The judge's weights (regime-adjusted, sum = 1.00)
 
@@ -577,18 +602,26 @@ old `dn++` walk leaving the bin array (13% of ordinary sessions, 40% of
 spike-shaped ones) and asserts the patched walk never forms an out-of-range
 index, never counts a bin twice, always keeps VAL ≤ POC ≤ VAH and always
 reaches 70% of the volume.
-All three are development checks only — they are **not** part of the EA and are never
-copied into MT5 (only the `MQL5/` folder is).
+`tools/trailing_policy_sim.py` — mirrors the adaptive trail's lane thresholds,
+market/evidence-sensitive ATR gap, cost floor, broker-distance clamp and one-way
+ratchet; it also checks that M5 management is wired before the TP1 branch and
+that the trail status is exposed in the LIVE panel.
+
+All four are development checks only — they are **not** part of the EA and are
+never copied into MT5 (only the `MQL5/` folder is). The focused trailing model
+is not a broker fill simulator, MetaEditor compile, backtest or profitability result.
 
 ---
 
 ## 6C. Phase 7 — validation plan (scripts built; results not yet run)
 
-**Owner's decisions:** Phase 7 covers all the validation in one phase, with no add-ons
-later. Pure MQL5 only, no Python in the test path. Trailing stop (Phase 8) and
-fine-tuning (Phase 9) come later. Phase 7 judges the EA **exactly as built**: nothing
-is tuned in Phase 7, so the zero-inputs rule (decision 17) holds and the EA itself
-gets no test code.
+**Owner's decisions:** Phase 7 covers the performance validation in one phase,
+with no add-ons later. Its MT5/Strategy Tester path is pure MQL5; the Python
+policy simulation in section 6B.4 is only a development check, not Phase 7
+performance evidence. Phase 7 must judge the EA **exactly as built**, including
+Phase 8's adaptive trailing stop: nothing is tuned in Phase 7, so the zero-inputs
+rule (decision 17) holds and the EA itself gets no test code. Phase 9 tuning is
+considered only after Phase 7 results.
 
 ### 6C.1 Validation scripts and audit inputs
 
@@ -656,13 +689,15 @@ bound of 95.7% and passes; 4 losses (98.0%) gives 94.97% and fails. So G2 means
 
 ## 7. One-line summary
 
-> **14 Oct 2026: everything in the sentence below is built except the proving
-> (Phase 7). Until then it trades on a demo account.**
+> **15 Oct 2026: the EA and adaptive trail are implemented in source; proof
+> (native compilation and Phase 7 validation) is still outstanding. Keep it on
+> demo until those checks are completed.**
 
 > A **pure MQL5, one-input, self-configuring EA** for any symbol on M5/M15/M30
 > charts: it scores BUY and SELL evidence independently, shows a directional bias
 > separately from a qualified trade signal, and retains regime, execution, safety,
 > and risk gates before auto-trading. It manages positions via a **60/80/100 TP
-> ladder with break-even** and displays the plan on a **draggable, self-sizing
-> two-panel interface**. The 98% figure is an unverified research target; this
-> workspace has not established performance or real-money readiness.
+> ladder plus adaptive, cost-aware trailing protection**; M5 does not wait for
+> TP1 to arm. The LIVE status appears on a **draggable, self-sizing two-panel
+> interface**. The 98% figure is an unverified research target; this workspace
+> has not established performance or real-money readiness.

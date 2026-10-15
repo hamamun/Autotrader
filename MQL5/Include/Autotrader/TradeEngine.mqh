@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| TradeEngine.mqh                                                   |
-//| Autotrader Phase 4 + 6 - the trade manager.                       |
+//| Autotrader Phase 4 + 6 + 8 - the trade manager.                   |
 //|                                                                   |
 //| What it does, in plain words:                                     |
 //|  * sizes the lot from the account's own equity and the 1% risk    |
@@ -10,8 +10,9 @@
 //|    side TP3, so the trade stays protected even if this EA dies;   |
 //|  * walks the owner's ladder: TP1 60% -> close 50% of the lot,     |
 //|    TP2 80% -> close 30%, TP3 100% -> close the rest;              |
-//|  * moves the stop to Entry (break-even) the moment TP1 banks, so  |
-//|    the trade can no longer become a Loss;                         |
+//|  * adapts a non-loss trailing stop to timeframe, market state,    |
+//|    price structure and changing directional evidence;            |
+//|  * never moves a profit-protecting stop back toward a loss;        |
 //|  * closes for time when a trade simply stalls;                    |
 //|  * repairs protection that went missing;                          |
 //|  * rebuilds all of the above from the broker's own position data  |
@@ -26,6 +27,42 @@
 
 #define ATTE_MAX_STATES 4
 #define ATTE_MAX_RETRY  3
+
+#define ATTE_TRAIL_WAITING    0
+#define ATTE_TRAIL_PROTECTED  1
+#define ATTE_TRAIL_FOLLOWING  2
+
+//--- A read-only snapshot from the direction/regime engines. Trade
+//--- management owns the stop; the signal engine only supplies context.
+struct SATTrailContext
+  {
+   bool     ready;
+   int      lane_minutes;       // 5 / 15 / 30
+   datetime bar_time;           // closed lane bar; score slope updates once per bar
+   double   atr;                 // current typical move, price units
+   double   atr_ratio;           // current ATR / its longer-run normal
+   double   efficiency;          // 0..1, straightness of price movement
+   int      sign_changes;        // recent candle direction flips
+   bool     trend;
+   bool     pullback;
+   bool     range_extreme;
+   bool     range_middle;
+   bool     volatile_state;
+   bool     quiet_state;
+   bool     transition_state;
+   int      lane_direction;      // +1 / -1 / 0
+   int      m15_direction;       // higher-timeframe alignment
+   int      m30_direction;       // higher-timeframe alignment
+   int      buy_score;            // evidence index, not probability
+   int      sell_score;
+   int      choch_direction;     // recent possible change of character
+   int      bars_since_choch;
+   int      swing_direction;
+   double   swing_high;
+   double   swing_low;
+   int      swing_high_bar;
+   int      swing_low_bar;
+  };
 
 struct SATTradeState
   {
@@ -42,6 +79,17 @@ struct SATTradeState
    bool     tp1_hit, tp2_hit, tp3_hit;
    datetime tp1_time;
    bool     be_armed, be_locked;
+   bool     trail_armed;
+   int      trail_stage;         // waiting / non-loss floor / following price
+   double   trail_best;          // highest BUY / lowest SELL price seen
+   double   trail_arm_r;         // adaptive activation threshold, in initial-risk units
+   double   trail_gap;           // current adaptive gap, price units
+   double   trail_cost_buffer;   // conservative break-even-plus-cost distance
+   datetime trail_bar_time;      // last closed lane bar used for confidence slope
+   int      trail_last_score;
+   int      trail_score_delta;
+   int      trail_updates;
+   string   trail_reason;
    datetime opened;
    int      expected_seconds;  // expected position duration
    int      pending_ttl_seconds; // pending entry freshness window
@@ -63,8 +111,10 @@ private:
    double   m_vmin, m_vmax, m_vstep;
    double   m_tick_size, m_tick_value;
    double   m_stops_price;
+   double   m_freeze_price;
    string   m_last_error;
    datetime m_last_protect_try;   // repairs are attempted at most every 5s
+   datetime m_last_trail_modify;  // avoid repeated broker requests at one quote
    //--- what we are about to open, so the new state is exact and not guessed
    bool     m_expect_new;
    int      m_expect_dir;
@@ -82,6 +132,21 @@ private:
    bool     EnsureProtection(const int idx);
    bool     PartialClose(const int idx, const double fraction, const string why);
    bool     MoveStopTo(const int idx, const double new_sl, const string why);
+   double   NormStopPrice(const double price, const int dir) const;
+   string   StateKey(const ulong ticket, const string suffix) const;
+   void     SaveState(const int idx);
+   void     RestoreState(const int idx);
+   void     DeleteState(const int idx);
+   void     UpdateTrailContext(const int idx, const SATTrailContext &ctx);
+   double   TrailArmThreshold(const int idx, const SATTrailContext &ctx) const;
+   double   TrailDistance(const int idx, const SATTrailContext &ctx) const;
+   double   BreakEvenFloor(const int idx);
+   double   EstimateRoundTurnCostPrice(const int idx);
+   bool     TrailCanImprove(const int idx, const double sl,
+                            const double bid, const double ask) const;
+   void     ManageTrailingStop(const int idx, const SATTrailContext &ctx,
+                               const double mark, const double bid,
+                               const double ask);
 
 public:
             CTradeEngine(void);
@@ -94,7 +159,7 @@ public:
    bool     Open(const int dir, const bool use_limit, const double entry,
                  const double sl, const double tp1, const double tp2, const double tp3,
                  const int expected_seconds, const double risk_pct, const double atr);
-   bool     Manage(void);  // true when a locally stale pending order was cancelled
+   bool     Manage(const SATTrailContext &ctx); // true when a pending order expires
    void     SetExpectedDefault(const int seconds);
    bool     ClosePosition(const int idx, const string why);
    bool     CancelPending(const string why);
@@ -110,6 +175,7 @@ public:
    double   TpProgress(const int idx) const;
    string   BeStateText(const int idx) const;
    string   SlJourneyText(const int idx) const;
+   string   TrailStatusText(const int idx) const;
   };
 
 //+------------------------------------------------------------------+
@@ -123,8 +189,10 @@ CTradeEngine::CTradeEngine(void)
    m_vmin = 0.01; m_vmax = 100.0; m_vstep = 0.01;
    m_tick_size = 0.0; m_tick_value = 0.0;
    m_stops_price = 0.0;
+   m_freeze_price = 0.0;
    m_last_error = "";
    m_last_protect_try = 0;
+   m_last_trail_modify = 0;
    m_expect_new = false;
    m_expect_dir = 0;
    m_expect_entry = 0.0; m_expect_sl = 0.0;
@@ -146,6 +214,17 @@ CTradeEngine::CTradeEngine(void)
       st[i].tp1_hit = false; st[i].tp2_hit = false; st[i].tp3_hit = false;
       st[i].tp1_time = 0;
       st[i].be_armed = false; st[i].be_locked = false;
+      st[i].trail_armed = false;
+      st[i].trail_stage = ATTE_TRAIL_WAITING;
+      st[i].trail_best = 0.0;
+      st[i].trail_arm_r = 0.0;
+      st[i].trail_gap = 0.0;
+      st[i].trail_cost_buffer = -1.0;
+      st[i].trail_bar_time = 0;
+      st[i].trail_last_score = 0;
+      st[i].trail_score_delta = 0;
+      st[i].trail_updates = 0;
+      st[i].trail_reason = "waiting for profit";
       st[i].opened = 0;
       st[i].expected_seconds = 0;
       st[i].pending_ttl_seconds = 0;
@@ -180,6 +259,7 @@ bool CTradeEngine::Init(const string symbol, const ulong magic,
    m_tick_size  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
    m_tick_value = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
    m_stops_price = profile.StopsLevelPrice();
+   m_freeze_price = (double)SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL) * m_point;
 
    trade.SetExpertMagicNumber(magic);
    trade.SetDeviationInPoints(deviation_pts);
@@ -201,6 +281,17 @@ bool CTradeEngine::Init(const string symbol, const ulong magic,
 double CTradeEngine::NormPrice(const double p) const
   {
    return NormalizeDouble(p, m_digits);
+  }
+
+// BUY stops round up and SELL stops down, preserving the cost floor.
+double CTradeEngine::NormStopPrice(const double price,const int dir) const
+  {
+   double step=(m_tick_size>0.0 ? m_tick_size : m_point);
+   if(step<=0.0 || (dir!=1 && dir!=-1))
+      return NormalizeDouble(price,m_digits);
+   double units=price/step;
+   double aligned=(dir==1 ? MathCeil(units-1e-10) : MathFloor(units+1e-10))*step;
+   return NormalizeDouble(aligned,m_digits);
   }
 
 double CTradeEngine::NormVolume(const double v) const
@@ -280,10 +371,109 @@ int CTradeEngine::FreeSlot(void) const
    return -1;
   }
 
+string CTradeEngine::StateKey(const ulong ticket,const string suffix) const
+  {
+   return "AT8_"+IntegerToString((long)m_magic)+"_"+
+          IntegerToString((long)ticket)+"_"+suffix;
+  }
+
+void CTradeEngine::SaveState(const int idx)
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || st[idx].ticket==0)
+      return;
+   const ulong ticket=st[idx].ticket;
+   GlobalVariableSet(StateKey(ticket,"V0"),st[idx].v0);
+   GlobalVariableSet(StateKey(ticket,"ET"),(double)st[idx].expected_seconds);
+   GlobalVariableSet(StateKey(ticket,"SL0"),st[idx].sl_initial);
+   GlobalVariableSet(StateKey(ticket,"T1"),(st[idx].tp1_hit ? 1.0 : 0.0));
+   GlobalVariableSet(StateKey(ticket,"T2"),(st[idx].tp2_hit ? 1.0 : 0.0));
+   GlobalVariableSet(StateKey(ticket,"T3"),(st[idx].tp3_hit ? 1.0 : 0.0));
+   GlobalVariableSet(StateKey(ticket,"T1T"),(double)st[idx].tp1_time);
+   GlobalVariableSet(StateKey(ticket,"TRA"),(st[idx].trail_armed ? 1.0 : 0.0));
+   GlobalVariableSet(StateKey(ticket,"TRS"),(double)st[idx].trail_stage);
+   GlobalVariableSet(StateKey(ticket,"TRP"),st[idx].trail_best);
+   GlobalVariableSet(StateKey(ticket,"TRSL"),st[idx].sl_now);
+   GlobalVariableSet(StateKey(ticket,"TRR"),st[idx].trail_arm_r);
+   GlobalVariableSet(StateKey(ticket,"TRG"),st[idx].trail_gap);
+   GlobalVariableSet(StateKey(ticket,"TRC"),st[idx].trail_cost_buffer);
+   GlobalVariableSet(StateKey(ticket,"TRB"),(double)st[idx].trail_bar_time);
+   GlobalVariableSet(StateKey(ticket,"TRSCORE"),(double)st[idx].trail_last_score);
+   GlobalVariableSet(StateKey(ticket,"TRDELTA"),(double)st[idx].trail_score_delta);
+   GlobalVariableSet(StateKey(ticket,"TRU"),(double)st[idx].trail_updates);
+  }
+
+void CTradeEngine::RestoreState(const int idx)
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || st[idx].ticket==0)
+      return;
+   const ulong ticket=st[idx].ticket;
+   string key=StateKey(ticket,"V0");
+   if(GlobalVariableCheck(key)) st[idx].v0=GlobalVariableGet(key);
+   key=StateKey(ticket,"ET");
+   if(GlobalVariableCheck(key)) st[idx].expected_seconds=(int)GlobalVariableGet(key);
+   key=StateKey(ticket,"SL0");
+   if(GlobalVariableCheck(key)) st[idx].sl_initial=GlobalVariableGet(key);
+   key=StateKey(ticket,"T1");
+   if(GlobalVariableCheck(key)) st[idx].tp1_hit=(GlobalVariableGet(key)>0.5);
+   key=StateKey(ticket,"T2");
+   if(GlobalVariableCheck(key)) st[idx].tp2_hit=(GlobalVariableGet(key)>0.5);
+   key=StateKey(ticket,"T3");
+   if(GlobalVariableCheck(key)) st[idx].tp3_hit=(GlobalVariableGet(key)>0.5);
+   key=StateKey(ticket,"T1T");
+   if(GlobalVariableCheck(key)) st[idx].tp1_time=(datetime)GlobalVariableGet(key);
+   key=StateKey(ticket,"TRA");
+   if(GlobalVariableCheck(key)) st[idx].trail_armed=(GlobalVariableGet(key)>0.5);
+   key=StateKey(ticket,"TRS");
+   if(GlobalVariableCheck(key)) st[idx].trail_stage=(int)GlobalVariableGet(key);
+   key=StateKey(ticket,"TRP");
+   if(GlobalVariableCheck(key)) st[idx].trail_best=GlobalVariableGet(key);
+   key=StateKey(ticket,"TRSL");
+   if(GlobalVariableCheck(key))
+     {
+      double saved_sl=GlobalVariableGet(key);
+      if(saved_sl>0.0 && st[idx].sl_now<=0.0)
+         st[idx].sl_now=saved_sl;
+      else if(saved_sl>0.0 && (st[idx].trail_armed || st[idx].tp1_hit))
+        {
+         if(st[idx].dir==1) st[idx].sl_now=MathMax(st[idx].sl_now,saved_sl);
+         else               st[idx].sl_now=MathMin(st[idx].sl_now,saved_sl);
+        }
+     }
+   key=StateKey(ticket,"TRR");
+   if(GlobalVariableCheck(key)) st[idx].trail_arm_r=GlobalVariableGet(key);
+   key=StateKey(ticket,"TRG");
+   if(GlobalVariableCheck(key)) st[idx].trail_gap=GlobalVariableGet(key);
+   key=StateKey(ticket,"TRC");
+   if(GlobalVariableCheck(key)) st[idx].trail_cost_buffer=GlobalVariableGet(key);
+   key=StateKey(ticket,"TRB");
+   if(GlobalVariableCheck(key)) st[idx].trail_bar_time=(datetime)GlobalVariableGet(key);
+   key=StateKey(ticket,"TRSCORE");
+   if(GlobalVariableCheck(key)) st[idx].trail_last_score=(int)GlobalVariableGet(key);
+   key=StateKey(ticket,"TRDELTA");
+   if(GlobalVariableCheck(key)) st[idx].trail_score_delta=(int)GlobalVariableGet(key);
+   key=StateKey(ticket,"TRU");
+   if(GlobalVariableCheck(key)) st[idx].trail_updates=(int)GlobalVariableGet(key);
+   if(st[idx].trail_armed && st[idx].trail_stage<ATTE_TRAIL_PROTECTED)
+      st[idx].trail_stage=ATTE_TRAIL_PROTECTED;
+  }
+
+void CTradeEngine::DeleteState(const int idx)
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || st[idx].ticket==0)
+      return;
+   const ulong ticket=st[idx].ticket;
+   string suffixes[18]={"V0","ET","SL0","T1","T2","T3","T1T","TRA",
+                        "TRS","TRP","TRSL","TRR","TRG","TRC","TRB",
+                        "TRSCORE","TRDELTA","TRU"};
+   for(int i=0;i<ArraySize(suffixes);i++)
+      GlobalVariableDel(StateKey(ticket,suffixes[i]));
+  }
+
 void CTradeEngine::DropState(const int idx)
   {
    if(idx < 0 || idx >= ATTE_MAX_STATES)
       return;
+   DeleteState(idx);
    //--- forget the restore notes for this ticket
    GlobalVariableDel("ATRV0_" + IntegerToString((long)m_magic) + "_" +
                      IntegerToString((long)st[idx].ticket));
@@ -325,6 +515,17 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
    st[idx].tp1_hit = false; st[idx].tp2_hit = false; st[idx].tp3_hit = false;
    st[idx].tp1_time = 0;
    st[idx].be_armed = false; st[idx].be_locked = false;
+   st[idx].trail_armed = false;
+   st[idx].trail_stage = ATTE_TRAIL_WAITING;
+   st[idx].trail_best = 0.0;
+   st[idx].trail_arm_r = 0.0;
+   st[idx].trail_gap = 0.0;
+   st[idx].trail_cost_buffer = -1.0;
+   st[idx].trail_bar_time = 0;
+   st[idx].trail_last_score = 0;
+   st[idx].trail_score_delta = 0;
+   st[idx].trail_updates = 0;
+   st[idx].trail_reason = "waiting for profit";
    st[idx].action = "";
    st[idx].expected_seconds = 0;
    st[idx].pending_ttl_seconds = 0;
@@ -376,27 +577,35 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
 
    if(!exact)
      {
-      //--- RESTORE after a restart. The terminal's global variables hold
-      //--- the true starting volume and expected duration; if they are
-      //--- gone (fresh terminal) the ladder is inferred from how much
-      //--- volume is left and whether the stop already sits at Entry.
+      //--- RESTORE after restart. New builds persist the TP flags and trail
+      //--- state explicitly. The older keys remain supported for trades
+      //--- opened by a pre-trailing build.
       string gv = "ATRV0_" + IntegerToString((long)m_magic) + "_" + IntegerToString((long)ticket);
       string ge = "ATRET_" + IntegerToString((long)m_magic) + "_" + IntegerToString((long)ticket);
       string gp = "ATPE_" + IntegerToString((long)m_magic) + "_" + IntegerToString((long)ticket);
-      if(GlobalVariableCheck(gv))
-         st[idx].v0 = GlobalVariableGet(gv);
-      if(GlobalVariableCheck(ge))
-         st[idx].expected_seconds = (int)GlobalVariableGet(ge);
-      if(GlobalVariableCheck(gp))
-         st[idx].pending_ttl_seconds = (int)GlobalVariableGet(gp);
+      if(GlobalVariableCheck(gv)) st[idx].v0 = GlobalVariableGet(gv);
+      if(GlobalVariableCheck(ge)) st[idx].expected_seconds = (int)GlobalVariableGet(ge);
+      if(GlobalVariableCheck(gp)) st[idx].pending_ttl_seconds = (int)GlobalVariableGet(gp);
 
+      bool saved_tp_state = GlobalVariableCheck(StateKey(ticket,"T1"));
+      RestoreState(idx);
       bool sl_at_or_better =
          (st[idx].dir == 1 && st[idx].sl_now > 0.0 &&
           st[idx].sl_now >= st[idx].entry - m_point) ||
          (st[idx].dir == -1 && st[idx].sl_now > 0.0 &&
           st[idx].sl_now <= st[idx].entry + m_point);
-      if(sl_at_or_better)
+      if(saved_tp_state)
         {
+         // An early trail can move the stop to entry before TP1, so a stop
+         // above/below entry must no longer be used to infer TP1 completion.
+         st[idx].be_armed = (st[idx].tp1_hit || st[idx].trail_armed);
+         st[idx].be_locked = sl_at_or_better;
+         if(st[idx].v0 <= 0.0) st[idx].v0 = st[idx].v_now;
+        }
+      else if(sl_at_or_better)
+        {
+         // Legacy restore only: older versions could only move the stop to
+         // entry after TP1, so the broker stop remains a valid clue.
          st[idx].be_armed  = true;
          st[idx].be_locked = true;
          st[idx].tp1_hit   = true;
@@ -410,6 +619,12 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
          else if(ratio <= 0.55) { st[idx].tp1_hit = true; st[idx].be_armed = true; }
         }
 
+      if(st[idx].trail_best <= 0.0 && !st[idx].is_pending)
+        {
+         double bid_now=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+         double ask_now=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+         st[idx].trail_best=(st[idx].dir==1 ? bid_now : ask_now);
+        }
       if(st[idx].tp3 <= 0.0)
         {
          //--- somebody removed the target: manage the stop only and say so
@@ -423,20 +638,27 @@ bool CTradeEngine::AddStateFromBroker(const ulong ticket)
          st[idx].action = "restored after restart";
      }
 
-   //--- remember for the next restart
+   //--- keep the legacy keys readable, while the full state uses AT8 keys
    GlobalVariableSet("ATRV0_" + IntegerToString((long)m_magic) + "_" +
                      IntegerToString((long)ticket), st[idx].v0);
    if(st[idx].expected_seconds > 0)
       GlobalVariableSet("ATRET_" + IntegerToString((long)m_magic) + "_" +
-                        IntegerToString((long)ticket),
-                        (double)st[idx].expected_seconds);
+                        IntegerToString((long)ticket), (double)st[idx].expected_seconds);
    if(st[idx].is_pending && st[idx].pending_ttl_seconds > 0)
       GlobalVariableSet("ATPE_" + IntegerToString((long)m_magic) + "_" +
-                        IntegerToString((long)ticket),
-                        (double)st[idx].pending_ttl_seconds);
+                        IntegerToString((long)ticket), (double)st[idx].pending_ttl_seconds);
 
    if(exact)
+     {
       st[idx].action = "opened";
+      if(!st[idx].is_pending)
+        {
+         double bid_now=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+         double ask_now=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+         st[idx].trail_best=(st[idx].dir==1 ? bid_now : ask_now);
+        }
+     }
+   SaveState(idx);
    return true;
   }
 
@@ -461,17 +683,39 @@ void CTradeEngine::UpdateStateFromBroker(const int idx)
       double sl_brok = PositionGetDouble(POSITION_SL);
       double tp_brok = PositionGetDouble(POSITION_TP);
       if(sl_brok > 0.0)
-         st[idx].sl_now = sl_brok;
+        {
+         bool profit_lock=(st[idx].trail_armed || st[idx].be_armed ||
+                           st[idx].be_locked || st[idx].tp1_hit);
+         if(st[idx].sl_now<=0.0 || !profit_lock)
+            st[idx].sl_now=sl_brok;
+         else if(st[idx].dir==1)
+            st[idx].sl_now=MathMax(st[idx].sl_now,sl_brok);
+         else
+            st[idx].sl_now=MathMin(st[idx].sl_now,sl_brok);
+        }
       if(tp_brok > 0.0)
          st[idx].tp3 = tp_brok;
-      //--- break-even is a fact of the stop's position, not of memory
-      bool at_be = (st[idx].dir == 1)
-                   ? (st[idx].sl_now >= st[idx].entry - m_point)
-                   : (st[idx].sl_now > 0.0 && st[idx].sl_now <= st[idx].entry + m_point);
-      if(at_be)
+      //--- For an armed trail, LOCKED means the broker SL is at the
+      //--- cost-aware floor, not merely at Entry. Legacy break-even states
+      //--- continue to use the textbook entry-price check.
+      if(st[idx].trail_armed)
         {
-         st[idx].be_armed = true;
-         st[idx].be_locked = true;
+         st[idx].be_armed=true;
+         double floor=BreakEvenFloor(idx);
+         st[idx].be_locked=(sl_brok>0.0 && floor>0.0 &&
+                            (st[idx].dir==1 ? sl_brok>=floor-m_point :
+                                             sl_brok<=floor+m_point));
+        }
+      else
+        {
+         bool at_be=(st[idx].dir==1)
+                    ? (st[idx].sl_now>=st[idx].entry-m_point)
+                    : (st[idx].sl_now>0.0 && st[idx].sl_now<=st[idx].entry+m_point);
+         if(at_be)
+           {
+            st[idx].be_armed=true;
+            st[idx].be_locked=true;
+           }
         }
      }
   }
@@ -705,23 +949,425 @@ bool CTradeEngine::Open(const int dir, const bool use_limit, const double entry,
   }
 
 //+------------------------------------------------------------------+
+void CTradeEngine::UpdateTrailContext(const int idx,const SATTrailContext &ctx)
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || !ctx.ready ||
+      ctx.bar_time<=0 || ctx.bar_time==st[idx].trail_bar_time)
+      return;
+   int score=(st[idx].dir==1 ? ctx.buy_score : ctx.sell_score);
+   if(st[idx].trail_bar_time>0)
+      st[idx].trail_score_delta=score-st[idx].trail_last_score;
+   else
+      st[idx].trail_score_delta=0;
+   st[idx].trail_last_score=score;
+   st[idx].trail_bar_time=ctx.bar_time;
+   SaveState(idx);
+  }
+
+//--- M5 arms earliest; higher timeframes allow more room. Evidence and
+//--- structure can advance protection, but never arm a losing stop.
+double CTradeEngine::TrailArmThreshold(const int idx,const SATTrailContext &ctx) const
+  {
+   int lane=ctx.lane_minutes;
+   if(lane<=0) lane=(int)Period();
+   double arm=(lane<=5 ? 0.45 : (lane<=15 ? 0.65 : 0.85));
+   if(idx<0 || idx>=ATTE_MAX_STATES)
+      return arm;
+
+   int own=(st[idx].dir==1 ? ctx.buy_score : ctx.sell_score);
+   int other=(st[idx].dir==1 ? ctx.sell_score : ctx.buy_score);
+   bool weak=(st[idx].trail_score_delta<=-6 || other>=own+10 ||
+              (ctx.choch_direction==-st[idx].dir && ctx.bars_since_choch<=3));
+   bool aligned=(ctx.m15_direction==st[idx].dir && ctx.m30_direction==st[idx].dir);
+   bool directional=(ctx.trend || ctx.pullback) && ctx.efficiency>=0.35;
+   bool strengthening=aligned && directional && own>=70 &&
+                      st[idx].trail_score_delta>=0 && !weak;
+
+   if(weak) arm-=0.12;
+   if(ctx.transition_state || ctx.range_middle) arm-=0.05;
+   if(ctx.volatile_state && (ctx.efficiency<0.45 || ctx.sign_changes>=4)) arm-=0.05;
+   if(strengthening) arm+=0.08;
+   return MathMax(0.30,MathMin(1.10,arm));
+  }
+
+//--- The leash is measured in current ATR (normal price movement), then
+//--- widened for aligned trends and tightened when the evidence fades.
+double CTradeEngine::TrailDistance(const int idx,const SATTrailContext &ctx) const
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || ctx.atr<=0.0)
+      return 0.0;
+   int lane=ctx.lane_minutes;
+   if(lane<=0) lane=(int)Period();
+   double base=(lane<=5 ? 0.65 : (lane<=15 ? 0.85 : 1.05));
+
+   int own=(st[idx].dir==1 ? ctx.buy_score : ctx.sell_score);
+   int other=(st[idx].dir==1 ? ctx.sell_score : ctx.buy_score);
+   bool weak=(st[idx].trail_score_delta<=-6 || other>=own+10 ||
+              (ctx.choch_direction==-st[idx].dir && ctx.bars_since_choch<=3));
+   bool aligned=(ctx.m15_direction==st[idx].dir && ctx.m30_direction==st[idx].dir);
+   bool directional=(ctx.trend || ctx.pullback) && ctx.efficiency>=0.35;
+   bool strengthening=aligned && directional && own>=70 &&
+                      st[idx].trail_score_delta>=0 && !weak;
+   bool choppy=(ctx.range_middle || ctx.efficiency<0.25 || ctx.sign_changes>=6);
+   bool chaotic=(ctx.volatile_state ||
+                 (ctx.atr_ratio>=1.50 && (ctx.efficiency<0.45 || ctx.sign_changes>=4)));
+
+   double atr_for_gap=ctx.atr;
+   if(chaotic && ctx.atr_ratio>1.0)
+     {
+      // A volatility burst with two-way movement must not expand the leash
+      // without limit. Keep some live-ATR room, but cap it near the normal ATR.
+      double normal_atr=ctx.atr/ctx.atr_ratio;
+      atr_for_gap=MathMax(ctx.atr*0.65,normal_atr*0.85);
+     }
+
+   double factor=1.0;
+   if(strengthening) factor*=1.20;
+   else if(directional) factor*=1.05;
+   if(choppy) factor*=0.88;
+   if(weak) factor*=0.70;
+   if(ctx.quiet_state) factor*=0.85;
+   if(ctx.volatile_state && !strengthening) factor*=0.92;
+   factor=MathMax(0.55,MathMin(1.35,factor));
+   return MathMax(m_point*3.0,atr_for_gap*base*factor);
+  }
+
+//--- Estimate round-turn commission/fee in price units from the entry
+//--- deals. Spread and any negative swap are added dynamically below.
+double CTradeEngine::EstimateRoundTurnCostPrice(const int idx)
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || st[idx].is_pending ||
+      !PositionSelectByTicket(st[idx].ticket))
+      return 0.0;
+   double volume=PositionGetDouble(POSITION_VOLUME);
+   if(volume<=0.0 || m_tick_size<=0.0 || m_tick_value<=0.0)
+      return 0.0;
+
+   ulong position_id=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   if(position_id==0 || !HistorySelectByPosition(position_id))
+      return 0.0;
+
+   double entry_cost=0.0;
+   double entry_volume=0.0;
+   int deals=HistoryDealsTotal();
+   for(int i=0;i<deals;i++)
+     {
+      ulong deal=HistoryDealGetTicket(i);
+      if(deal==0 || (long)HistoryDealGetInteger(deal,DEAL_ENTRY)!=DEAL_ENTRY_IN)
+         continue;
+      double deal_volume=HistoryDealGetDouble(deal,DEAL_VOLUME);
+      if(deal_volume<=0.0)
+         continue;
+      entry_volume+=deal_volume;
+      entry_cost+=MathAbs(HistoryDealGetDouble(deal,DEAL_COMMISSION))+
+                  MathAbs(HistoryDealGetDouble(deal,DEAL_FEE));
+     }
+   if(entry_volume<=0.0)
+      return 0.0;
+   double round_turn_money=2.0*entry_cost*(volume/entry_volume);
+   double money_per_price=(m_tick_value/m_tick_size)*volume;
+   if(money_per_price<=0.0)
+      return 0.0;
+   return round_turn_money/money_per_price;
+  }
+
+//--- A positive-price floor for a profit-protecting stop. It includes
+//--- current spread, estimated round-turn fees and negative swap.
+double CTradeEngine::BreakEvenFloor(const int idx)
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active ||
+      !PositionSelectByTicket(st[idx].ticket))
+      return 0.0;
+   if(st[idx].trail_cost_buffer<0.0)
+      st[idx].trail_cost_buffer=EstimateRoundTurnCostPrice(idx);
+
+   double bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+   double spread=(ask>bid ? ask-bid : m_point);
+   double volume=PositionGetDouble(POSITION_VOLUME);
+   double money_per_price=0.0;
+   if(volume>0.0 && m_tick_size>0.0 && m_tick_value>0.0)
+      money_per_price=(m_tick_value/m_tick_size)*volume;
+   double swap=PositionGetDouble(POSITION_SWAP);
+   double swap_buffer=(swap<0.0 && money_per_price>0.0 ? -swap/money_per_price : 0.0);
+   double buffer=MathMax(m_point*2.0,spread)+st[idx].trail_cost_buffer+swap_buffer;
+   return NormStopPrice(st[idx].entry+(double)st[idx].dir*buffer,st[idx].dir);
+  }
+
+bool CTradeEngine::TrailCanImprove(const int idx,const double sl,
+                                    const double bid,const double ask) const
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || sl<=0.0 || bid<=0.0 || ask<=0.0)
+      return false;
+   double live_stops=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_STOPS_LEVEL)*m_point;
+   double live_freeze=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_FREEZE_LEVEL)*m_point;
+   double min_distance=MathMax(MathMax(m_stops_price,live_stops),
+                               MathMax(m_freeze_price,live_freeze))+m_point;
+   if(st[idx].dir==1)
+      return (sl<bid-min_distance);
+   return (sl>ask+min_distance);
+  }
+
+void CTradeEngine::ManageTrailingStop(const int idx,const SATTrailContext &ctx,
+                                      const double mark,const double bid,
+                                      const double ask)
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || st[idx].is_pending ||
+      !PositionSelectByTicket(st[idx].ticket) || mark<=0.0)
+      return;
+   int dir=st[idx].dir;
+   if(st[idx].trail_best<=0.0)
+     {
+      st[idx].trail_best=mark;
+      GlobalVariableSet(StateKey(st[idx].ticket,"TRP"),st[idx].trail_best);
+     }
+   else if((dir==1 && mark>st[idx].trail_best) ||
+           (dir==-1 && mark<st[idx].trail_best))
+     {
+      st[idx].trail_best=mark;
+      GlobalVariableSet(StateKey(st[idx].ticket,"TRP"),st[idx].trail_best);
+     }
+
+   UpdateTrailContext(idx,ctx);
+   double risk=MathAbs(st[idx].entry-st[idx].sl_initial);
+   if(risk<=m_point && PositionGetDouble(POSITION_SL)>0.0)
+      risk=MathAbs(st[idx].entry-PositionGetDouble(POSITION_SL));
+   if(risk<=m_point)
+     {
+      st[idx].trail_reason="waiting - initial risk unavailable";
+      return;
+     }
+
+   double favorable=MathMax(0.0,(mark-st[idx].entry)*(double)dir);
+   double progress_r=favorable/risk;
+   double floor=BreakEvenFloor(idx);
+   double floating=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+   double arm=TrailArmThreshold(idx,ctx);
+   st[idx].trail_arm_r=arm;
+
+   if(!st[idx].trail_armed)
+     {
+      if(progress_r<arm || floating<=0.0)
+        {
+         st[idx].trail_reason=StringFormat("waiting for +%.2fR profit",arm);
+         return;
+        }
+      double live_stops=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_STOPS_LEVEL)*m_point;
+      double live_freeze=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_FREEZE_LEVEL)*m_point;
+      double min_distance=MathMax(MathMax(m_stops_price,live_stops),
+                                  MathMax(m_freeze_price,live_freeze))+m_point*2.0;
+      if((dir==1 && bid-floor<=min_distance) ||
+         (dir==-1 && floor-ask<=min_distance))
+        {
+         st[idx].trail_reason="armed by profit - waiting for broker stop space";
+         return;
+        }
+      st[idx].trail_armed=true;
+      st[idx].trail_stage=ATTE_TRAIL_PROTECTED;
+      st[idx].be_armed=true;
+      st[idx].trail_reason="non-loss protection armed";
+      SaveState(idx);
+     }
+
+   if(!st[idx].trail_armed)
+      return;
+   if(floor<=0.0)
+      return;
+
+   int lane=ctx.lane_minutes;
+   if(lane<=0) lane=(int)Period();
+   double follow_r=(lane<=5 ? 0.80 : (lane<=15 ? 1.05 : 1.30));
+   int own=(dir==1 ? ctx.buy_score : ctx.sell_score);
+   int other=(dir==1 ? ctx.sell_score : ctx.buy_score);
+   bool weak=(st[idx].trail_score_delta<=-6 || other>=own+10 ||
+              (ctx.choch_direction==-dir && ctx.bars_since_choch<=3));
+   bool aligned=(ctx.m15_direction==dir && ctx.m30_direction==dir);
+   bool directional=(ctx.trend || ctx.pullback) && ctx.efficiency>=0.35;
+   if(weak) follow_r-=0.15;
+   if(aligned && directional && own>=70 && !weak) follow_r+=0.10;
+   follow_r=MathMax(arm+0.12,follow_r);
+
+   double candidate=floor;
+   if(progress_r>=follow_r && ctx.atr>0.0)
+     {
+      st[idx].trail_stage=ATTE_TRAIL_FOLLOWING;
+      st[idx].trail_gap=TrailDistance(idx,ctx);
+      if(dir==1)
+         candidate=st[idx].trail_best-st[idx].trail_gap;
+      else
+         candidate=st[idx].trail_best+st[idx].trail_gap;
+
+      // A recent confirmed swing is a second, structural guide. M5 uses a
+      // shorter freshness window; old pivots never drag a stop toward loss.
+      int max_swing_age=(lane<=5 ? 6 : (lane<=15 ? 4 : 3));
+      double swing_buffer=MathMax(ctx.atr*0.15,m_point*2.0);
+      if(dir==1 && ctx.swing_low>st[idx].entry && ctx.swing_low<mark &&
+         ctx.swing_low_bar>=2 && ctx.swing_low_bar<=max_swing_age)
+         candidate=MathMax(candidate,ctx.swing_low-swing_buffer);
+      if(dir==-1 && ctx.swing_high>0.0 && ctx.swing_high<st[idx].entry &&
+         ctx.swing_high>mark && ctx.swing_high_bar>=2 &&
+         ctx.swing_high_bar<=max_swing_age)
+         candidate=MathMin(candidate,ctx.swing_high+swing_buffer);
+      st[idx].trail_reason=(weak ? "tightening - evidence fading" :
+                            (aligned && directional ? "following - aligned trend" :
+                             (ctx.range_middle || ctx.sign_changes>=6 ?
+                              "following - choppy market" : "following recent price")));
+     }
+   else
+     {
+      st[idx].trail_stage=ATTE_TRAIL_PROTECTED;
+      st[idx].trail_gap=TrailDistance(idx,ctx);
+      st[idx].trail_reason="protecting entry plus costs";
+     }
+
+   // The stop is always on the profitable side of entry after trailing arms.
+   if(dir==1)
+      candidate=MathMax(candidate,floor);
+   else
+      candidate=MathMin(candidate,floor);
+
+   double live_stops=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_STOPS_LEVEL)*m_point;
+   double live_freeze=(double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_FREEZE_LEVEL)*m_point;
+   double min_distance=MathMax(MathMax(m_stops_price,live_stops),
+                               MathMax(m_freeze_price,live_freeze))+m_point*2.0;
+   if(dir==1)
+     {
+      double highest_valid=bid-min_distance;
+      if(highest_valid<floor)
+        {
+         st[idx].trail_reason="armed - waiting for non-loss stop space";
+         return;
+        }
+      candidate=MathMin(candidate,highest_valid);
+      candidate=MathMax(candidate,floor);
+     }
+   else
+     {
+      double lowest_valid=ask+min_distance;
+      if(lowest_valid>floor)
+        {
+         st[idx].trail_reason="armed - waiting for non-loss stop space";
+         return;
+        }
+      candidate=MathMax(candidate,lowest_valid);
+      candidate=MathMin(candidate,floor);
+     }
+   candidate=NormStopPrice(candidate,dir);
+   if(!TrailCanImprove(idx,candidate,bid,ask))
+     {
+      st[idx].trail_reason="armed - waiting for broker stop space";
+      return;
+     }
+
+   double broker_sl=PositionGetDouble(POSITION_SL);
+   double current_sl=(broker_sl>0.0 ? broker_sl : st[idx].sl_now);
+   double improvement=(dir==1 ? candidate-current_sl : current_sl-candidate);
+   double step=MathMax(m_point*2.0,(ctx.atr>0.0 ? ctx.atr*0.04 : m_point*2.0));
+   bool already_locked=false;
+   if(broker_sl>0.0)
+     {
+      if(st[idx].trail_armed)
+         already_locked=(floor>0.0 &&
+                         (dir==1 ? broker_sl>=floor-m_point*0.5 :
+                                   broker_sl<=floor+m_point*0.5));
+      else
+         already_locked=(dir==1 ? broker_sl>=st[idx].entry-m_point*0.5 :
+                                  broker_sl<=st[idx].entry+m_point*0.5);
+     }
+   st[idx].be_locked=already_locked;
+   if(current_sl>0.0 && improvement<step)
+      return;
+
+   datetime now=TimeCurrent();
+   if(m_last_trail_modify>0 && now<=m_last_trail_modify)
+      return;
+   m_last_trail_modify=now;
+   string why=(st[idx].trail_stage==ATTE_TRAIL_FOLLOWING ?
+               "adaptive trailing stop" : "non-loss profit protection");
+   if(MoveStopTo(idx,candidate,why))
+     {
+      st[idx].be_locked=true;
+      st[idx].trail_updates++;
+      SaveState(idx);
+     }
+   else
+      st[idx].trail_reason="armed - broker update pending";
+  }
+
+//+------------------------------------------------------------------+
 bool CTradeEngine::MoveStopTo(const int idx, const double new_sl, const string why)
   {
-   if(idx < 0 || !st[idx].active)
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active || st[idx].is_pending ||
+      !PositionSelectByTicket(st[idx].ticket))
       return false;
-   double sl = NormPrice(new_sl);
-   double tp = NormPrice(st[idx].tp3);
-   if(tp <= 0.0)
-      tp = NormPrice(PositionGetDouble(POSITION_TP));
-   if(!trade.PositionModify(st[idx].ticket, sl, tp))
+
+   double broker_sl=PositionGetDouble(POSITION_SL);
+   if(broker_sl>0.0)
+      st[idx].sl_now=broker_sl;
+   double sl=NormStopPrice(new_sl,st[idx].dir);
+   bool profit_protection=(st[idx].trail_armed || st[idx].be_armed || st[idx].tp1_hit);
+   if(profit_protection)
      {
-      m_last_error = "SL move failed: " + trade.ResultRetcodeDescription();
-      Print("Autotrader: ", m_last_error);
+      double floor=BreakEvenFloor(idx);
+      if(floor<=0.0)
+         return false;
+      if(st[idx].dir==1)
+         sl=NormStopPrice(MathMax(sl,floor),1);
+      else
+         sl=NormStopPrice(MathMin(sl,floor),-1);
+     }
+
+   // A stop is a one-way ratchet. TP1 may request entry, but it can never
+   // undo an earlier profitable trail.
+   double tol=m_point*0.5;
+   if(st[idx].dir==1 && broker_sl>0.0 && sl<=broker_sl+tol)
+     {
+      st[idx].sl_now=broker_sl;
+      if(profit_protection && broker_sl>=BreakEvenFloor(idx)-m_point)
+         st[idx].be_locked=true;
+      return true;
+     }
+   if(st[idx].dir==-1 && broker_sl>0.0 && sl>=broker_sl-tol)
+     {
+      st[idx].sl_now=broker_sl;
+      if(profit_protection && broker_sl<=BreakEvenFloor(idx)+m_point)
+         st[idx].be_locked=true;
+      return true;
+     }
+
+   double bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+   if(profit_protection)
+     {
+      // Never submit a trail on the losing side of entry, even if a caller
+      // accidentally supplies an unsafe value.
+      if((st[idx].dir==1 && sl<st[idx].entry) ||
+         (st[idx].dir==-1 && sl>st[idx].entry))
+         return false;
+     }
+   if(!TrailCanImprove(idx,sl,bid,ask))
+      return false;
+
+   double tp=NormPrice(st[idx].tp3);
+   if(tp<=0.0)
+      tp=NormPrice(PositionGetDouble(POSITION_TP));
+   bool sent=trade.PositionModify(st[idx].ticket,sl,tp);
+   uint rc=trade.ResultRetcode();
+   if(!sent || (rc!=TRADE_RETCODE_DONE && rc!=TRADE_RETCODE_PLACED))
+     {
+      m_last_error="SL move failed: "+trade.ResultRetcodeDescription();
+      Print("Autotrader: ",m_last_error);
       return false;
      }
-   st[idx].sl_now = sl;
-   st[idx].action = why;
-   Print("Autotrader: stop moved to ", DoubleToString(sl, m_digits), " (", why, ")");
+   st[idx].sl_now=sl;
+   st[idx].action=why;
+   if(profit_protection)
+     {
+      st[idx].be_armed=true;
+      st[idx].be_locked=true;
+     }
+   SaveState(idx);
+   Print("Autotrader: stop moved to ",DoubleToString(sl,m_digits)," (",why,")");
    return true;
   }
 
@@ -836,9 +1482,35 @@ bool CTradeEngine::EnsureProtection(const int idx)
    if(m_last_protect_try > 0 && now - m_last_protect_try < 5)
       return true;
 
-   double want_sl = NormPrice(st[idx].sl_now);
-   double want_tp = NormPrice(st[idx].tp3);
-   double tol = m_point * 0.5;
+   double want_sl=NormStopPrice(st[idx].sl_now,st[idx].dir);
+   double want_tp=NormPrice(st[idx].tp3);
+   double tol=m_point*0.5;
+   bool profit_lock=(st[idx].trail_armed || st[idx].be_armed ||
+                     st[idx].be_locked || st[idx].tp1_hit);
+   if(want_sl<=0.0)
+     {
+      if(profit_lock)
+         want_sl=BreakEvenFloor(idx);
+      else
+         want_sl=NormStopPrice(st[idx].sl_initial,st[idx].dir);
+     }
+   if(profit_lock && want_sl>0.0)
+     {
+      double floor=BreakEvenFloor(idx);
+      if(floor>0.0)
+        {
+         if(st[idx].dir==1)
+            want_sl=NormStopPrice(MathMax(want_sl,floor),1);
+         else
+            want_sl=NormStopPrice(MathMin(want_sl,floor),-1);
+        }
+     }
+   if(sl_brok>0.0 && want_sl>0.0)
+     {
+      // Repairs may restore or tighten protection, never loosen the broker SL.
+      if(st[idx].dir==1) want_sl=MathMax(want_sl,sl_brok);
+      else               want_sl=MathMin(want_sl,sl_brok);
+     }
 
    bool need = false;
    if(want_sl > 0.0 && (sl_brok <= 0.0 || MathAbs(sl_brok - want_sl) > tol)) need = true;
@@ -850,22 +1522,34 @@ bool CTradeEngine::EnsureProtection(const int idx)
       want_sl = sl_brok;
    if(want_tp <= 0.0)
       want_tp = tp_brok;
-   if(want_sl <= 0.0)
+   if(want_sl<=0.0)
       return false;
-
-   if(!trade.PositionModify(st[idx].ticket, want_sl, want_tp))
+   bool sl_change=(sl_brok<=0.0 || MathAbs(sl_brok-want_sl)>tol);
+   if(sl_change)
      {
-      m_last_error = "protection repair failed: " + trade.ResultRetcodeDescription();
+      double bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+      double ask=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+      if(!TrailCanImprove(idx,want_sl,bid,ask))
+         return false;
+     }
+
+   bool sent=trade.PositionModify(st[idx].ticket,want_sl,want_tp);
+   uint rc=trade.ResultRetcode();
+   if(!sent || (rc!=TRADE_RETCODE_DONE && rc!=TRADE_RETCODE_PLACED))
+     {
+      m_last_error="protection repair failed: "+trade.ResultRetcodeDescription();
       return false;
      }
-   st[idx].action = "protection repaired";
+   st[idx].sl_now=want_sl;
+   st[idx].action="protection repaired";
+   SaveState(idx);
    return true;
   }
 
 //+------------------------------------------------------------------+
 //| MANAGE - one pass over every trade we own                         |
 //+------------------------------------------------------------------+
-bool CTradeEngine::Manage(void)
+bool CTradeEngine::Manage(const SATTrailContext &ctx)
   {
    Sync();
    m_last_pending_event = "";
@@ -922,21 +1606,31 @@ bool CTradeEngine::Manage(void)
       int    dir   = st[i].dir;
       double mark  = (dir == 1) ? bid : ask;    // the price we would close at
 
-      //--- keep the broker-side protection honest
+      //--- keep the broker-side protection honest, then manage the adaptive
+      //--- non-loss trail before the TP ladder so M5 can protect profit early.
       EnsureProtection(i);
+      ManageTrailingStop(i,ctx,mark,bid,ask);
 
-      //--- TP1: bank half the lot, then the trade cannot lose any more
+      //--- TP1: bank half the lot; retain any more-protective trail already set
       if(!st[i].tp1_hit && st[i].tp1 > 0.0 &&
          ((dir == 1 && mark >= st[i].tp1) || (dir == -1 && mark <= st[i].tp1)))
         {
-         if(PartialClose(i, 0.50, "TP1 hit - closed 50% of lot"))
+         if(PartialClose(i,0.50,"TP1 hit - closed 50% of lot"))
            {
-            st[i].tp1_hit = true;
-            st[i].tp1_time = TimeCurrent();
-            st[i].be_armed = true;
-            //--- break-even: the stop moves up to the Entry price
-            if(MoveStopTo(i, st[i].entry, "moved to Entry - break-even locked"))
-               st[i].be_locked = true;
+            st[i].tp1_hit=true;
+            st[i].tp1_time=TimeCurrent();
+            st[i].be_armed=true;
+            st[i].trail_armed=true;
+            if(st[i].trail_stage<ATTE_TRAIL_PROTECTED)
+               st[i].trail_stage=ATTE_TRAIL_PROTECTED;
+            if(st[i].trail_best<=0.0) st[i].trail_best=mark;
+            st[i].trail_reason="TP1 reached - protecting profit";
+            // The floor includes spread/fees/swap. MoveStopTo is one-way,
+            // so TP1 can never pull a better early trail back to entry.
+            if(MoveStopTo(i,BreakEvenFloor(i),
+                          "TP1 hit - non-loss stop protected"))
+               st[i].be_locked=true;
+            SaveState(i);
            }
          continue;   // one action per position per tick
         }
@@ -945,8 +1639,11 @@ bool CTradeEngine::Manage(void)
       if(st[i].tp1_hit && !st[i].tp2_hit && st[i].tp2 > 0.0 &&
          ((dir == 1 && mark >= st[i].tp2) || (dir == -1 && mark <= st[i].tp2)))
         {
-         if(PartialClose(i, 0.30, "TP2 hit - closed 30% of lot"))
-            st[i].tp2_hit = true;
+         if(PartialClose(i,0.30,"TP2 hit - closed 30% of lot"))
+           {
+            st[i].tp2_hit=true;
+            SaveState(i);
+           }
          continue;
         }
 
@@ -1025,26 +1722,45 @@ string CTradeEngine::BeStateText(const int idx) const
    if(idx < 0 || !st[idx].active)
       return "not armed";
    if(st[idx].be_locked)
-      return "LOCKED";
+      return (st[idx].trail_armed ? "LOCKED (non-loss trail)" : "LOCKED");
    if(st[idx].be_armed)
-      return "ARMED (after TP1)";
+      return (st[idx].trail_armed ? "ARMED (trail update pending)" : "ARMED (after TP1)");
    return "not armed";
   }
 
 string CTradeEngine::SlJourneyText(const int idx) const
   {
-   if(idx < 0 || !st[idx].active)
+   if(idx<0 || !st[idx].active)
       return "";
-   string now = DoubleToString(st[idx].sl_now, m_digits);
-   if(MathAbs(st[idx].sl_now - st[idx].sl_initial) < m_point * 0.5)
-      return now + "  (initial)";
-   bool at_be = (st[idx].dir == 1)
-                ? (st[idx].sl_now >= st[idx].entry - m_point)
-                : (st[idx].sl_now <= st[idx].entry + m_point);
+   string now=DoubleToString(st[idx].sl_now,m_digits);
+   if(MathAbs(st[idx].sl_now-st[idx].sl_initial)<m_point*0.5)
+      return now+"  (initial)";
+   if(st[idx].trail_armed && st[idx].be_locked)
+      return now+"  (initial "+GLYPH_ARROW+" non-loss trail)";
+   bool at_be=(st[idx].dir==1)
+              ? (st[idx].sl_now>=st[idx].entry-m_point)
+              : (st[idx].sl_now<=st[idx].entry+m_point);
    if(at_be)
-      return now + "  (started " + DoubleToString(st[idx].sl_initial, m_digits) +
-             " " + GLYPH_ARROW + " moved to Entry)";
-   return now + "  (started " + DoubleToString(st[idx].sl_initial, m_digits) + ")";
+      return now+"  (started "+DoubleToString(st[idx].sl_initial,m_digits)+
+             " "+GLYPH_ARROW+" protected at entry)";
+   return now+"  (started "+DoubleToString(st[idx].sl_initial,m_digits)+")";
+  }
+
+string CTradeEngine::TrailStatusText(const int idx) const
+  {
+   if(idx<0 || idx>=ATTE_MAX_STATES || !st[idx].active)
+      return "OFF";
+   if(st[idx].is_pending)
+      return "waiting for entry";
+   if(st[idx].trail_stage==ATTE_TRAIL_FOLLOWING && st[idx].be_locked)
+      return "FOLLOWING "+DoubleToString(st[idx].sl_now,m_digits)+" - "+st[idx].trail_reason;
+   if(st[idx].trail_armed && st[idx].be_locked)
+      return "PROTECTED "+DoubleToString(st[idx].sl_now,m_digits)+" - "+st[idx].trail_reason;
+   if(st[idx].trail_armed)
+      return "ARMED - "+st[idx].trail_reason;
+   if(st[idx].trail_reason!="")
+      return st[idx].trail_reason;
+   return "waiting for profit";
   }
 //+------------------------------------------------------------------+
 #endif // AUTOTRADER_TRADE_ENGINE_MQH

@@ -294,12 +294,117 @@ void RunBrains(const bool force)
   }
 
 //+------------------------------------------------------------------+
+//| give the trade manager a compact, current market/trend snapshot   |
+//+------------------------------------------------------------------+
+void BuildTrailContext(SATTrailContext &ctx)
+  {
+   ctx.ready=false;
+   ctx.lane_minutes=(int)Period();
+   ctx.bar_time=0;
+   ctx.atr=g_symbol.AtrPrice();
+   ctx.atr_ratio=g_symbol.AtrRatio();
+   ctx.efficiency=0.0;
+   ctx.sign_changes=0;
+   ctx.trend=false; ctx.pullback=false; ctx.range_extreme=false;
+   ctx.range_middle=false; ctx.volatile_state=false; ctx.quiet_state=false;
+   ctx.transition_state=false;
+   ctx.lane_direction=0;
+   ctx.m15_direction=g_dir.a15.regime.Direction();
+   ctx.m30_direction=g_dir.a30.regime.Direction();
+   ctx.buy_score=g_dir.BuyScore();
+   ctx.sell_score=g_dir.SellScore();
+   ctx.choch_direction=0; ctx.bars_since_choch=999;
+   ctx.swing_direction=0;
+   ctx.swing_high=0.0; ctx.swing_low=0.0;
+   ctx.swing_high_bar=0; ctx.swing_low_bar=0;
+
+   if(Period()==PERIOD_M5)
+     {
+      ctx.ready=g_dir.a5.ready;
+      ctx.atr=g_dir.a5.atr;
+      ctx.atr_ratio=g_dir.a5.atr_ratio;
+      ctx.efficiency=g_dir.a5.eff;
+      ctx.sign_changes=g_dir.a5.regime.SignChanges();
+      ctx.trend=g_dir.a5.regime.IsTrend();
+      ctx.pullback=g_dir.a5.regime.IsPullback();
+      ctx.range_extreme=g_dir.a5.regime.IsRangeExtreme();
+      ctx.range_middle=(g_dir.a5.regime.Kind()==AT_REGIME_RANGE_MIDDLE);
+      ctx.volatile_state=(g_dir.a5.regime.Kind()==AT_REGIME_VOLATILE);
+      ctx.quiet_state=(g_dir.a5.regime.Kind()==AT_REGIME_QUIET);
+      ctx.transition_state=(g_dir.a5.regime.Kind()==AT_REGIME_TRANSITION ||
+                            g_dir.a5.regime.Kind()==AT_REGIME_CALIBRATING);
+      ctx.lane_direction=g_dir.a5.regime.Direction();
+      ctx.choch_direction=g_dir.a5.smc.choch_dir;
+      ctx.bars_since_choch=g_dir.a5.smc.bars_since_choch;
+      ctx.swing_direction=g_dir.a5.smc.structure_dir;
+      ctx.swing_high=g_dir.a5.smc.swing_hi;
+      ctx.swing_low=g_dir.a5.smc.swing_lo;
+      ctx.swing_high_bar=g_dir.a5.smc.swing_hi_bar;
+      ctx.swing_low_bar=g_dir.a5.smc.swing_lo_bar;
+     }
+   else if(Period()==PERIOD_M15)
+     {
+      ctx.ready=g_dir.a15.ready;
+      ctx.atr=g_dir.a15.atr;
+      ctx.atr_ratio=g_dir.a15.atr_ratio;
+      ctx.efficiency=g_dir.a15.eff;
+      ctx.sign_changes=g_dir.a15.regime.SignChanges();
+      ctx.trend=g_dir.a15.regime.IsTrend();
+      ctx.pullback=g_dir.a15.regime.IsPullback();
+      ctx.range_extreme=g_dir.a15.regime.IsRangeExtreme();
+      ctx.range_middle=(g_dir.a15.regime.Kind()==AT_REGIME_RANGE_MIDDLE);
+      ctx.volatile_state=(g_dir.a15.regime.Kind()==AT_REGIME_VOLATILE);
+      ctx.quiet_state=(g_dir.a15.regime.Kind()==AT_REGIME_QUIET);
+      ctx.transition_state=(g_dir.a15.regime.Kind()==AT_REGIME_TRANSITION ||
+                            g_dir.a15.regime.Kind()==AT_REGIME_CALIBRATING);
+      ctx.lane_direction=g_dir.a15.regime.Direction();
+      ctx.choch_direction=g_dir.a15.smc.choch_dir;
+      ctx.bars_since_choch=g_dir.a15.smc.bars_since_choch;
+      ctx.swing_direction=g_dir.a15.smc.structure_dir;
+      ctx.swing_high=g_dir.a15.smc.swing_hi;
+      ctx.swing_low=g_dir.a15.smc.swing_lo;
+      ctx.swing_high_bar=g_dir.a15.smc.swing_hi_bar;
+      ctx.swing_low_bar=g_dir.a15.smc.swing_lo_bar;
+     }
+   else
+     {
+      ctx.lane_minutes=30;
+      ctx.ready=g_dir.a30.ready;
+      ctx.atr=g_dir.a30.atr;
+      ctx.atr_ratio=g_dir.a30.atr_ratio;
+      ctx.efficiency=g_dir.a30.eff;
+      ctx.sign_changes=g_dir.a30.regime.SignChanges();
+      ctx.trend=g_dir.a30.regime.IsTrend();
+      ctx.pullback=g_dir.a30.regime.IsPullback();
+      ctx.range_extreme=g_dir.a30.regime.IsRangeExtreme();
+      ctx.range_middle=(g_dir.a30.regime.Kind()==AT_REGIME_RANGE_MIDDLE);
+      ctx.volatile_state=(g_dir.a30.regime.Kind()==AT_REGIME_VOLATILE);
+      ctx.quiet_state=(g_dir.a30.regime.Kind()==AT_REGIME_QUIET);
+      ctx.transition_state=(g_dir.a30.regime.Kind()==AT_REGIME_TRANSITION ||
+                            g_dir.a30.regime.Kind()==AT_REGIME_CALIBRATING);
+      ctx.lane_direction=g_dir.a30.regime.Direction();
+      ctx.choch_direction=g_dir.a30.smc.choch_dir;
+      ctx.bars_since_choch=g_dir.a30.smc.bars_since_choch;
+      ctx.swing_direction=g_dir.a30.smc.structure_dir;
+      ctx.swing_high=g_dir.a30.smc.swing_hi;
+      ctx.swing_low=g_dir.a30.smc.swing_lo;
+      ctx.swing_high_bar=g_dir.a30.smc.swing_hi_bar;
+      ctx.swing_low_bar=g_dir.a30.smc.swing_lo_bar;
+     }
+   ctx.bar_time=g_dir.LaneBarTime();
+   if(ctx.atr<=0.0) ctx.atr=g_symbol.AtrPrice();
+   if(ctx.atr_ratio<=0.0) ctx.atr_ratio=g_symbol.AtrRatio();
+  }
+
+//+------------------------------------------------------------------+
 //| manage positions and record locally expired pending orders        |
 //+------------------------------------------------------------------+
 void ManageTrades(void)
   {
-   if(g_trade.Manage())
-      g_stats.Log("EXPIRE", g_trade.LastPendingEvent());
+   SATTrailContext ctx;
+   BuildTrailContext(ctx);
+   if(g_trade.Manage(ctx))
+      g_stats.Log("EXPIRE",g_trade.LastPendingEvent());
   }
 
 //+------------------------------------------------------------------+
@@ -609,7 +714,7 @@ void UpdateLivePanel(void)
    //--- rows 3-5: the protective stop, break-even, trailing
    g_live.SetRow(3, "Stop Loss : " + g_trade.SlJourneyText(i), CLR_TEXT);
    g_live.SetRow(4, "Break-Even: " + g_trade.BeStateText(i), CLR_TEXT);
-   g_live.SetRow(5, "Trail Stop: OFF (later phase)", CLR_TEXT);
+   g_live.SetRow(5, "Trail Stop: " + g_trade.TrailStatusText(i), CLR_TEXT);
 
    //--- rows 6-8: the owner's 60 / 80 / 100 ladder
    string tp1s, tp2s, tp3s;
@@ -654,10 +759,27 @@ void UpdateLivePanel(void)
    string st;
    if(g_trade.st[i].is_pending)
       st = "STATUS: Waiting - entry at " + FmtPrice(g_trade.st[i].entry);
+   else if(!g_trade.st[i].tp1_hit && g_trade.st[i].trail_armed &&
+           g_trade.st[i].be_locked &&
+           g_trade.st[i].trail_stage==ATTE_TRAIL_FOLLOWING)
+      st="STATUS: Managing - adaptive trail following price before TP1";
+   else if(!g_trade.st[i].tp1_hit && g_trade.st[i].trail_armed &&
+           !g_trade.st[i].be_locked)
+      st="STATUS: Managing - trail armed; waiting for safe broker stop space";
+   else if(!g_trade.st[i].tp1_hit && g_trade.st[i].trail_armed)
+      st="STATUS: Managing - profit floor locked, running to TP1";
    else if(!g_trade.st[i].tp1_hit)
-      st = "STATUS: Managing - running to TP1";
+      st="STATUS: Managing - trail waiting for a profitable move to TP1";
+   else if(!g_trade.st[i].tp2_hit && g_trade.st[i].trail_armed &&
+           !g_trade.st[i].be_locked)
+      st="STATUS: Managing - trail armed; waiting for safe broker stop space";
+   else if(!g_trade.st[i].tp2_hit &&
+           g_trade.st[i].trail_stage==ATTE_TRAIL_FOLLOWING)
+      st="STATUS: Managing - adaptive trail following price, running to TP2";
+   else if(!g_trade.st[i].tp2_hit && g_trade.st[i].be_locked)
+      st="STATUS: Managing - protected past entry, running to TP2";
    else if(!g_trade.st[i].tp2_hit)
-      st = "STATUS: Managing - break-even locked, running to TP2";
+      st="STATUS: Managing - running to TP2";
    else if(!g_trade.st[i].tp3_hit)
       st = "STATUS: Managing - running to TP3";
    else

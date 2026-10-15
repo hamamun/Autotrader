@@ -8,14 +8,16 @@ establish profitability or real-money readiness.
 
 ## Current status
 
-**Core phases 1–6 are implemented; the two-sided display, audit, and pending-order
-freshness improvements are applied in code but still need native MT5 validation.** The EA reads three timeframes and may
-place orders when Auto Trading is enabled. Strategy Tester, walk-forward, and
-demo-forward validation have not established its performance; keep it on demo
-until those checks are completed and reviewed.
+**Core phases 1–6 and the adaptive trailing-stop implementation (Phase 8) are
+in source.** Static lint and synthetic policy checks pass, but this workspace has
+no MetaEditor/MT5, so the MQL5 has not been natively compiled and no Strategy
+Tester, walk-forward, or demo-forward results establish performance. The EA reads
+three timeframes and may place orders when Auto Trading is enabled; keep it on
+demo until native compilation and independent validation are completed and
+reviewed.
 
-> The one input is still **Auto Trading** ON/OFF. Phases 3–6 added **no** new
-> settings — every number is measured from the market or derived from the
+> The one input is still **Auto Trading** ON/OFF. Phases 3–6 and 8 added **no**
+> new settings — every number is measured from the market or derived from the
 > symbol's own profile.
 
 What works right now:
@@ -58,25 +60,30 @@ What works right now:
   and always respects the broker's stops level and the spread, TP = the symbol's
   own dial × its own wiggle, and Expected Duration is computed from the target
   distance and this symbol's real speed — not a fixed phrase.
-- **Trade engine (Phase 4, live).** Risk-sized lots from equity × the risk dial,
-  a **hard broker-side stop on every order**, broker-side TP3, the ladder
-  TP1 60% → close 50%, TP2 80% → close 30%, TP3 100% → close the rest,
-  **break-even (stop moved to Entry) the moment TP1 banks**, a time exit when a
-  trade stalls, and repair of any protection that goes missing.
-- **LIVE TRADING panel (Phase 4, live).** No longer a preview: it appears only
-  while a real position or pending entry exists and shows the real ticket, lot,
-  open time, Entry → Now with floating P/L, the stop's journey
-  (`initial` → `moved to Entry`), Break-Even state, Trail Stop (Phase 8), the
-  TP1/TP2/TP3 ladder with live status and the manager's STATUS line.
+- **Trade engine (Phases 4 + 8, implemented in source).** Risk-sized lots,
+  broker-side initial SL and TP3, the TP1/TP2/TP3 ladder (50% / 30% / remainder),
+  time exit, restart restoration, and missing-protection repair. Its adaptive
+  trailing policy uses the active M5/M15/M30 lane, ATR/volatility, regime,
+  directional-score change and recent structure. M5 can arm before TP1.
+  Proposed trail levels are clamped to the profitable side of Entry and an
+  entry-plus-cost floor (current spread, estimated round-turn fees and negative
+  swap). Broker stop/freeze rules may delay placing that level, leaving the
+  existing stop in place. TP1 arms the same protection without loosening a
+  better trail. A stop price cannot guarantee the final fill or net P/L through
+  gaps, slippage, changing costs or broker rejection.
+- **LIVE TRADING panel (Phases 4 + 8).** It appears only while a real position or
+  pending entry exists and shows the real ticket, lot, open time, Entry → Now
+  with floating P/L, the live SL journey, Break-Even state, adaptive trail state
+  (waiting / protected / following), the TP ladder and the manager's STATUS line.
 - **Safety layer (Phase 5, live).** Trading permissions, stale-quote and weekend
   detection, the symbol's own spread limit, HIGH-impact news freeze (MQL5
   economic calendar) for the symbol's currencies, gap-shock freeze, daily-loss
   stand-down (3% of the day-start equity), equity floor (15% off the high-water
   mark). It only stops **new** trades — open trades keep being managed.
-- **Restart-restore (Phase 5, live).** After a restart, reconnection or
-  re-attach, every open trade is rebuilt from the broker's own data plus two
-  terminal global variables per ticket; if those are gone the ladder state is
-  inferred from the remaining volume and whether the stop already sits at Entry.
+- **Restart-restore (Phase 5, extended for Phase 8).** Broker position/order
+  data plus per-ticket terminal globals restore the ladder flags and trailing
+  state, including the best price and last protective stop. Older trades retain
+  the existing volume/stop inference fallback.
 - **Scoreboard + decision audit.** The CSV now records a two-sided assessment
   per closed lane bar (BUY/SELL scores, gap, evidence breakdown, spread, plan
   levels, and trade-eligibility reason), then records latched signals and
@@ -111,7 +118,8 @@ What works right now:
    must be under `Scripts/`. Nothing else in this repo is needed by MT5 —
    `tools/` and the docs stay here.
 3. Open `MQL5/Experts/Autotrader/Autotrader.mq5` in **MetaEditor** and press
-   **Compile** (F7). Zero errors expected.
+   **Compile** (F7). Native compilation has not been run in this workspace; check
+   and resolve any diagnostics before attaching the EA.
 4. In MT5: open a chart of any symbol at **M5, M15 or M30**, drag `Autotrader`
    onto the chart, enable **Algo Trading**.
 5. **Use a demo account until Phase 7 has proven the numbers.**
@@ -162,7 +170,7 @@ window.
 | 5 | Safety layer (news, spread, daily loss, restart-restore) | **built** |
 | 6 | Auto-execution + Win/Loss/BE logging + counters | **implemented; pending freshness and audit extended** |
 | 7 | Tester, walk-forward, PBO/Deflated Sharpe, permutation test, demo forward (pure MQL5, see PLAN 6C) | **not yet validated; must be run and reviewed** |
-| 8 | Trailing stop | later |
+| 8 | Adaptive M5/M15/M30 trailing stop with cost-aware non-loss floor, restart state and LIVE panel | **implemented in source; lint/synthetic checks pass; native MT5 validation required** |
 
 Win/Loss rule (owner's): closed at any positive value = **Win**,
 closed at any negative value = **Loss**, closed at exactly zero = **BE**.
@@ -170,8 +178,9 @@ Success % = Win ÷ (Win + Loss) — that is the number Phase 7 must push to ~98.
 
 ## Development checks (not part of the EA)
 
-This workspace has no MetaEditor, so three small Python checkers were used while
-writing the MQL5; they live in `tools/` and are never copied into MT5:
+This workspace has no MetaEditor, so four small Python development checkers
+were used alongside the MQL5; they live in `tools/` and are never copied into
+MT5:
 
 - `python3 tools/mql5_lint.py` — brackets, include guards, duplicate
   definitions, declared-vs-defined class methods, EA calls that do not exist,
@@ -194,3 +203,7 @@ writing the MQL5; they live in `tools/` and are never copied into MT5:
   the bin array (13% of ordinary sessions, 40% of spike-shaped ones) and asserts
   that the patched walk never forms an out-of-range index, never counts a bin
   twice, always keeps VAL <= POC <= VAH and always reaches 70% of the volume.
+- `python3 tools/trailing_policy_sim.py` — checks lane-specific activation,
+  regime/evidence-sensitive ATR gaps, the pre-TP1 M5 path, cost-floor and broker
+  distance constraints, one-way stop ratcheting, and the MQL5 wiring. It mirrors
+  policy arithmetic; it does not compile MQL5 or simulate broker execution.
